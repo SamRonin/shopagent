@@ -235,6 +235,31 @@
     return unit ? `${body} تومان` : body;
   }
 
+  /**
+   * How much of `text` is *price material* (digits, separators, currency
+   * words, percent/parens) versus real words.
+   *
+   *   «۲,۸۹۰,۰۰۰ تومان» → 1     (pure price)
+   *   «(۱۲۳۴)»          → 1     (pure number — context decides later)
+   *   «گوشی مدل 2024»   → ~0.5  (a title that merely contains digits)
+   *
+   * Used by the content script to ignore titles/labels whose digits must
+   * never be mistaken for the displayed price.
+   *
+   * @param {string} text
+   * @returns {number} 0..1
+   */
+  function priceLikeness(text) {
+    const t = String(text ?? '').trim();
+    if (!t) return 0;
+    const stripped = t
+      .replace(/[۰-۹٠-٩0-9]/g, '')
+      .replace(/[.,،٬'’\s\u00A0\u2009]/g, '')
+      .replace(/(تومان|تومن|تمن|ریال|toman|rial)/gi, '')
+      .replace(/[()٪%]/g, '');
+    return 1 - stripped.length / t.length;
+  }
+
   /** Short human form: 3,000,000 → «۳ میلیون». */
   function formatMoneyShort(value, { digits = 'fa' } = {}) {
     const n = Number(value);
@@ -343,6 +368,7 @@
     extractMoney,
     parsePrice,
     parseBudget,
+    priceLikeness,
     formatMoney,
     formatMoneyShort,
     sleep,

@@ -36,6 +36,7 @@
     logger = () => ({ debug() {}, info() {}, warn() {}, error() {} }),
     uid = (p) => `${p}_${Math.random().toString(36).slice(2)}`,
     toPersianDigits = (s) => s,
+    priceLikeness = () => 1,
   } = utils;
 
   const log = logger('content');
@@ -602,12 +603,12 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * Price extraction — context-aware, never fooled by stray numbers
+   * Price extraction — read exactly the number the user sees
    * ------------------------------------------------------------------ */
 
-  /** Elements whose numbers are NOT prices: ratings, discounts, counts… */
+  /** Subtrees whose numbers are NOT prices: ratings, discounts, counts… */
   const PRICE_BAD_RE =
-    /(rating|star|score|review|comment|count|discount|off|badge|tag|view|sold|sale|installment|warranty|timer|time|label|تخفیف|امتیاز|رای|رأی|نظر|دیدگاه|فروش|شگفت|گارانتی|ماه)/i;
+    /(?:^|[^a-zآ-ی])(rating|star|score|review|comment|count|discount|badge|sold|sale|installment|warranty|timer|cashback|تخفیف|امتیاز|رای|رأی|نظر|دیدگاه|شگفت|گارانتی|ماه|بن)(?:$|[^a-zآ-ی])/i;
   /** Elements that look like a price container. */
   const PRICE_HINT_RE = /(price|cost|amount|قیمت|toman|rial|ریال)/i;
   /** An explicit currency word — the strongest price evidence. */
@@ -635,61 +636,125 @@
   }
 
   /**
+   * The element's text with every struck-through («was» price) and every
+   * rating/discount subtree removed. Without this, a price CONTAINER's
+   * textContent concatenates old+new prices and `prefer:'first'` happily
+   * returns the wrong one.
+   */
+  function priceTextOf(el) {
+    let out = '';
+    const walk = (node) => {
+      for (const child of Array.from(node.childNodes)) {
+        if (child.nodeType === 3) {
+          out += child.nodeValue;
+          continue;
+        }
+        if (child.nodeType !== 1) continue;
+        if (isStruck(child)) continue;
+        if (PRICE_BAD_RE.test(elementSignature(child))) continue;
+        walk(child);
+      }
+    };
+    walk(el);
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
+  function fontSizeOf(el) {
+    try {
+      return parseFloat(getComputedStyle(el).fontSize) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * When a container holds several plausible numbers (e.g. a «was» price
+   * that is NOT marked as struck-through), the displayed price is the one
+   * rendered in the largest font. Resolve the container's value to that
+   * child instead of blindly taking the first number in text order.
+   */
+  function dominantChildValue(el) {
+    let best = null;
+    for (const d of el.querySelectorAll('*')) {
+      const t = priceTextOf(d);
+      if (!t || t.length > 60 || priceLikeness(t) < 0.7) continue;
+      const v = parsePrice(t, { prefer: 'first' });
+      if (v === null) continue;
+      const f = fontSizeOf(d);
+      if (!best || f > best.f) best = { v, f };
+    }
+    return best ? best.v : null;
+  }
+
+  /**
    * Read the current price (and the struck "was" price) out of a card.
    *
-   * Candidates are collected from the declared price selectors (or the
-   * whole card as fallback), then ranked in tiers:
-   *   currency-anchored + price-hint  >  currency-anchored  >  price-hint  >  bare
-   * Numbers living inside rating/discount/count containers are discarded,
-   * struck-through values only feed `original`, and implausible values
-   * (< 500 Toman) never qualify at all. This is what stops a «(۶۰)»
-   * review count from being shown as the price of a 300,000 Toman item.
+   * Store class names are obfuscated hashes, so we cannot trust them.
+   * Instead every candidate is ranked by evidence that survives any
+   * redesign:
+   *   1. currency word + price-hint container
+   *   2. currency word
+   *   3. price-hint container / declared selector
+   *   4. LARGEST FONT SIZE  ← the number the user actually sees
+   *   5. price-likeness of the text, then DOM order
+   * Struck-through values only ever feed `original`, and subtrees that
+   * carry ratings/discounts are removed from the text before parsing.
    */
   function extractPrice(card) {
+    const declared = queryAll(adapter.selectors?.productPrice || [], card);
+    const inDeclared = (el) => declared.some((d) => d === el || d.contains(el));
+
     const candidates = [];
     let original = null;
 
-    const declared = queryAll(adapter.selectors?.productPrice || [], card);
-    const scopes = declared.length ? declared : [card];
+    for (const el of [card, ...card.querySelectorAll('*')]) {
+      if (el.children.length > 6) continue;
 
-    for (const rootNode of scopes) {
-      const els = [rootNode, ...rootNode.querySelectorAll('*')];
-      for (const el of els) {
-        if (!el || el.children.length > 3) continue;
-        const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
-        if (!text || text.length > 80) continue;
-
-        const value = parsePrice(text, { prefer: 'first' }); // strict: plausible range only
-        if (value === null) continue;
-
-        if (isStruck(el) || struckContext(el, card)) {
-          if (original === null || value > original) original = value;
-          continue;
-        }
-        if (badPriceContext(el, card)) continue;
-
-        const sig = elementSignature(el);
-        candidates.push({
-          value,
-          anchored: CURRENCY_RE.test(text),
-          hint: PRICE_HINT_RE.test(sig),
-        });
+      if (isStruck(el) || struckContext(el, card)) {
+        const v = parsePrice((el.textContent || '').trim(), { prefer: 'max' });
+        if (v !== null && (original === null || v > original)) original = v;
+        continue;
       }
+      if (badPriceContext(el, card)) continue;
+
+      const text = priceTextOf(el);
+      if (!text || text.length > 80) continue;
+      const likeness = priceLikeness(text);
+      if (likeness < 0.55) continue; // a title/label that merely contains digits
+
+      let value = parsePrice(text, { prefer: 'first' }); // strict range
+      if (value === null) continue;
+
+      // Several plausible numbers in one container (e.g. an un-struck
+      // «was» price)? Trust the largest-font child — the visible price.
+      if (extractMoney(text).filter((c) => c.value >= 500).length > 1) {
+        const dv = dominantChildValue(el);
+        if (dv !== null) value = dv;
+      }
+
+      candidates.push({
+        value,
+        anchored: CURRENCY_RE.test(text),
+        hint: PRICE_HINT_RE.test(elementSignature(el)) || inDeclared(el),
+        font: fontSizeOf(el),
+        likeness,
+        order: candidates.length,
+      });
     }
 
-    const tiers = [(c) => c.anchored && c.hint, (c) => c.anchored, (c) => c.hint, () => true];
-    let current = null;
-    for (const test of tiers) {
-      const hit = candidates.find(test);
-      if (hit) {
-        current = hit.value;
-        break;
-      }
-    }
+    candidates.sort(
+      (a, b) =>
+        (b.anchored && b.hint ? 1 : 0) - (a.anchored && a.hint ? 1 : 0) ||
+        (b.anchored ? 1 : 0) - (a.anchored ? 1 : 0) ||
+        (b.hint ? 1 : 0) - (a.hint ? 1 : 0) ||
+        b.font - a.font ||
+        b.likeness - a.likeness ||
+        a.order - b.order
+    );
 
+    let current = candidates.length ? candidates[0].value : null;
     if (current === null) {
-      // Last resort over the whole card: currency-anchored first.
-      const full = card.textContent || '';
+      const full = priceTextOf(card);
       current = parsePrice(full, { prefer: 'first', anchoredOnly: true });
       if (current === null) current = parsePrice(full, { prefer: 'first' });
     }

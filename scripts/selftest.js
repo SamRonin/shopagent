@@ -122,6 +122,10 @@ eq('anchored=false for bare count', utils.extractMoney('(۱۲۳)')[0].anchored, 
 eq('anchoredOnly rejects bare counts', utils.parsePrice('(۱۲۴)', { anchoredOnly: true }), null);
 eq('anchoredOnly accepts currency', utils.parsePrice('۱۲۳۴ تومان', { anchoredOnly: true }), 1234);
 eq('rial still converts', utils.parsePrice('۳,۰۰۰,۰۰۰ ریال'), 300000);
+eq('pure price text likeness = 1', utils.priceLikeness('۲,۸۹۰,۰۰ تومان'), 1);
+eq('parenthesised count likeness = 1', utils.priceLikeness('(۱۲۳۴)'), 1);
+ok('title with digits is not price-like', utils.priceLikeness('گوشی مدل 2024 ظرفیت 256') < 0.55, utils.priceLikeness('گوشی مدل 2024 ظرفیت 256'));
+ok('label + price still price-like', utils.priceLikeness('قیمت: ۲,۸۹۰,۰۰') >= 0.55, utils.priceLikeness('قیمت: ۲,۸۹۰,۰۰۰'));
 
 /* ------------------------------------------------------------------ *
  * 3. Budget phrases
