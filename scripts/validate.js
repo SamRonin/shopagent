@@ -130,6 +130,27 @@ const bgToContent = new Set([...bg.matchAll(/sendToContent\(\s*[^,]+,\s*'([A-Z_]
 const missingContent = [...bgToContent].filter((a) => !contentActions.has(a));
 missingContent.length ? bad(`background calls missing content actions: ${missingContent.join(', ')}`) : good(`all ${bgToContent.size} background→content actions exist`);
 
+/* ---------------------------------------------------------------- 7 */
+console.log('\n\x1b[36m▸ content.js: every bare utils call is destructured\x1b[0m');
+{
+  (0, eval)(read('shared/utils.js'));
+  const utilsExports = Object.keys(globalThis.ShopAgent.utils);
+  const src = read('content/content.js');
+  const block = src.match(/const \{([\s\S]*?)\} = utils;/);
+  if (!block) {
+    bad('content.js: could not locate the `const { ... } = utils` destructure block');
+  } else {
+    const destructured = new Set([...block[1].matchAll(/^\s*([A-Za-z0-9_]+)\s*=/gm)].map((x) => x[1]));
+    const body = src.slice(block.index + block[0].length);
+    const missing = utilsExports.filter(
+      (k) => new RegExp(`(?<![.\\w])${k}\\s*\\(`).test(body) && !destructured.has(k)
+    );
+    missing.length
+      ? bad(`content.js uses utils exports that are not destructured: ${missing.join(', ')}  (→ ReferenceError at runtime)`)
+      : good(`all ${destructured.size} destructured utils bindings cover every bare call`);
+  }
+}
+
 /* ---------------------------------------------------------------- */
 console.log(`\n\x1b[1m${problems ? `\x1b[31m${problems} problem(s)\x1b[0m` : '\x1b[32mAll cross-file checks passed.\x1b[0m'}\x1b[0m`);
 process.exit(problems ? 1 : 0);

@@ -37,6 +37,7 @@
     uid = (p) => `${p}_${Math.random().toString(36).slice(2)}`,
     toPersianDigits = (s) => s,
     priceLikeness = () => 1,
+    extractMoney = () => [],
   } = utils;
 
   const log = logger('content');
