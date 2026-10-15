@@ -1,0 +1,46 @@
+# ShopAgent CI — zero-dependency checks.
+# No npm install: the extension ships vanilla JS, so CI only needs Node
+# for syntax + the two pure-JS test scripts.
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: syntax · selftest · cross-file validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax check every JS file
+        run: |
+          for f in shared/*.js content/content.js background.js sidepanel/sidepanel.js scripts/*.js; do
+            node --check "$f" || exit 1
+          done
+
+      - name: Shared-module self tests
+        run: node scripts/selftest.js
+
+      - name: Cross-file consistency (manifest / html / i18n / messages)
+        run: node scripts/validate.js
+
+      - name: Manifest is valid JSON with sane permissions
+        run: |
+          node -e '
+            const m = require("./manifest.json");
+            if (m.manifest_version !== 3) throw new Error("manifest_version must be 3");
+            const allowed = ["activeTab","scripting","storage","sidePanel","tabs"];
+            const extra = (m.permissions||[]).filter(p => !allowed.includes(p));
+            if (extra.length) throw new Error("unexpected permissions: " + extra.join(", "));
+            console.log("manifest ok:", m.name, m.version, "permissions:", m.permissions.join(", "));
+          '

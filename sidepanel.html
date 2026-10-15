@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>خرید‌یار هوشمند — ShopAgent</title>
+  <link rel="stylesheet" href="sidepanel/sidepanel.css" />
+</head>
+
+<body>
+  <!-- ============================================================ *
+   * Icon sprite
+   * ============================================================ -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="i-logo" viewBox="0 0 24 24">
+        <path fill="currentColor" d="M6.6 3.2h10.8a1.2 1.2 0 0 1 1.09.7l1.5 3.26a2.4 2.4 0 0 1-.53 2.6l-.28.28V19a2.6 2.6 0 0 1-2.6 2.6H7.42A2.6 2.6 0 0 1 4.82 19v-8.96l-.28-.28a2.4 2.4 0 0 1-.53-2.6l1.5-3.26a1.2 1.2 0 0 1 1.09-.7Zm-.72 2.4-1.13 2.45h14.5L17.6 5.6H5.88ZM7.42 12a1.2 1.2 0 0 0-1.2 1.2v5.8c0 .66.54 1.2 1.2 1.2h9.16c.66 0 1.2-.54 1.2-1.2v-5.8a1.2 1.2 0 0 0-1.2-1.2H7.42Z" />
+        <path fill="currentColor" d="M12 13.1a.9.9 0 0 1 .9.9v.9h.9a.9.9 0 1 1 0 1.8h-.9v.9a.9.9 0 1 1-1.8 0v-.9h-.9a.9.9 0 1 1 0-1.8h.9V14a.9.9 0 0 1 .9-.9Z" opacity=".85" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4.2" />
+          <path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4 17 7M7 17l-1.6 1.6" />
+        </g>
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path fill="currentColor" d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11Z" />
+      </symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.1" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-2.9 1.2v.17a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-2.98-1.18l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 3.4 15H3.2a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.02l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 10.4 3.4V3.2a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 2.9 1.2l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0 1.2 2.9h.17a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1Z" />
+        </g>
+      </symbol>
+      <symbol id="i-send" viewBox="0 0 24 24">
+        <path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.39 10.2l12.6 1.8-12.6 1.8Z" />
+      </symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24">
+        <rect x="6" y="6" width="12" height="12" rx="2.4" fill="currentColor" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6 6 18" />
+        </g>
+      </symbol>
+      <symbol id="i-external" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 4h6v6M20 4l-9 9" />
+          <path d="M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10" />
+        </g>
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" stroke-linecap="round" />
+        </g>
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.5 5 5 10-11" />
+      </symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+          <path d="M12 8.5v5" /><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none" />
+          <path d="M10.3 3.9 2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" stroke-linejoin="round" />
+        </g>
+      </symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24">
+        <path fill="currentColor" d="M12 2.5l1.9 5.6 5.6 1.9-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.9L12 2.5Zm6.6 11.2.95 2.75 2.75.95-2.75.95-.95 2.75-.95-2.75-2.75-.95 2.75-.95.95-2.75Z" />
+      </symbol>
+      <symbol id="i-scales" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 4v16M7 20h10M4 9h16M8 9l-3.4 6.2a3.6 3.6 0 0 0 6.8 0L8 9Zm8 0-3.4 6.2a3.6 3.6 0 0 0 6.8 0L16 9Z" />
+        </g>
+      </symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.7">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3.2 9.5h17.6M3.2 14.5h17.6" />
+          <ellipse cx="12" cy="12" rx="4" ry="9" />
+        </g>
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1A1.9 1.9 0 0 0 9.2 21h5.6a1.9 1.9 0 0 0 1.9-1.9L17.5 7" />
+        </g>
+      </symbol>
+      <symbol id="i-plug" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 3v5M15 3v5M6.5 8h11v3a5.5 5.5 0 0 1-11 0V8ZM12 16.5V21" />
+        </g>
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+          <circle cx="11" cy="11" r="6.6" /><path d="m16 16 4.5 4.5" />
+        </g>
+      </symbol>
+      <symbol id="i-star" viewBox="0 0 24 24">
+        <path fill="currentColor" d="m12 3.6 2.6 5.3 5.8.85-4.2 4.1 1 5.8-5.2-2.74L6.8 19.65l1-5.8-4.2-4.1 5.8-.85L12 3.6Z" />
+      </symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m9 5 7 7-7 7" />
+      </symbol>
+      <symbol id="i-box" viewBox="0 0 24 24">
+        <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+          <path d="M20.5 8.2v7.6a1.6 1.6 0 0 1-.85 1.42l-6.9 3.6a1.6 1.6 0 0 1-1.5 0l-6.9-3.6A1.6 1.6 0 0 1 3.5 15.8V8.2a1.6 1.6 0 0 1 .85-1.42l6.9-3.6a1.6 1.6 0 0 1 1.5 0l6.9 3.6A1.6 1.6 0 0 1 20.5 8.2Z" />
+          <path d="m3.9 7.3 8.1 4.2 8.1-4.2M12 20.4v-8.9" stroke-linecap="round" />
+        </g>
+      </symbol>
+    </defs>
+  </svg>
+
+  <!-- ============================================================ *
+   * App shell
+   * ============================================================ -->
+  <div class="app" id="app">
+
+    <!-- ---------- Header ---------- -->
+    <header class="hdr">
+      <div class="hdr-brand">
+        <span class="hdr-logo" aria-hidden="true"><svg><use href="#i-logo" /></svg></span>
+        <div class="hdr-titles">
+          <h1 data-i18n="app.name">خرید‌یار هوشمند</h1>
+          <p data-i18n="app.tagline">دستیار خرید خودکار برای فروشگاه‌های ایرانی</p>
+        </div>
+      </div>
+      <div class="hdr-tools">
+        <button class="icon-btn" id="btnLang" data-i18n-aria="settings.language" title="FA / EN">
+          <svg><use href="#i-globe" /></svg><span class="lang-tag" id="langTag">FA</span>
+        </button>
+        <button class="icon-btn" id="btnTheme" data-i18n-aria="a11y.toggleTheme"><svg><use href="#i-moon" /></svg></button>
+        <button class="icon-btn" id="btnSettings" data-i18n-aria="a11y.openSettings"><svg><use href="#i-gear" /></svg></button>
+      </div>
+    </header>
+
+    <!-- ---------- Engine status strip ---------- -->
+    <section class="engine" id="engine" aria-live="polite">
+      <button class="engine-main" id="engineMain" type="button">
+        <span class="engine-dot" id="engineDot" data-state="idle"></span>
+        <span class="engine-text">
+          <strong id="engineName">Ollama</strong>
+          <small id="engineModel">llama3.2</small>
+        </span>
+        <svg class="engine-chev"><use href="#i-chevron" /></svg>
+      </button>
+      <button class="engine-test" id="btnTestConn" data-i18n="settings.test">تست اتصال</button>
+    </section>
+
+    <!-- ---------- Store picker ---------- -->
+    <section class="storebar">
+      <span class="storebar-label" data-i18n="store.pick">فروشگاه</span>
+      <div class="segmented" id="storePicker" role="radiogroup" aria-label="Store">
+        <button type="button" role="radio" aria-checked="false" data-store="current">
+          <svg><use href="#i-box" /></svg><span data-i18n="store.current">همین تب</span>
+        </button>
+        <button type="button" role="radio" aria-checked="true" data-store="digikala">
+          <span data-i18n="store.digikala">دیجی‌کالا</span>
+        </button>
+        <button type="button" role="radio" aria-checked="false" data-store="basalam">
+          <span data-i18n="store.basalam">باسلام</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- ---------- Conversation stream ---------- -->
+    <main class="stream" id="stream" aria-live="polite" aria-relevant="additions text">
+      <div class="empty" id="emptyState">
+        <div class="empty-art" aria-hidden="true">
+          <svg viewBox="0 0 120 96">
+            <rect x="8" y="14" width="104" height="70" rx="12" class="ea-panel" />
+            <rect x="20" y="26" width="46" height="7" rx="3.5" class="ea-line" />
+            <rect x="20" y="40" width="80" height="5" rx="2.5" class="ea-line soft" />
+            <rect x="20" y="51" width="64" height="5" rx="2.5" class="ea-line soft" />
+            <rect x="20" y="64" width="30" height="9" rx="4.5" class="ea-pill" />
+            <circle cx="94" cy="30" r="9" class="ea-spark" />
+            <path d="M94 24.6l1.5 4 4 1.5-4 1.5-1.5 4-1.5-4-4-1.5 4-1.5z" class="ea-star" />
+          </svg>
+        </div>
+        <h2 data-i18n="empty.title">سلام! من خرید‌یار هوشمندم 👋</h2>
+        <p data-i18n="empty.body"></p>
+        <p class="empty-note" data-i18n="empty.note"></p>
+      </div>
+    </main>
+
+    <!-- ---------- Composer ---------- -->
+    <footer class="composer">
+      <div class="chips" id="chips"></div>
+      <form class="composer-row" id="composerForm">
+        <textarea id="command" rows="1" data-i18n-placeholder="input.placeholder"
+          aria-label="Command" spellcheck="false" autocomplete="off"></textarea>
+        <button type="submit" class="btn-send" id="btnSend" data-i18n-aria="a11y.send">
+          <svg><use href="#i-send" /></svg>
+        </button>
+        <button type="button" class="btn-stop hidden" id="btnStop">
+          <svg><use href="#i-stop" /></svg><span data-i18n="input.stop">توقف</span>
+        </button>
+      </form>
+      <div class="composer-foot">
+        <span class="kbd-hint" id="kbdHint"><kbd>Enter</kbd> <span data-i18n="input.send">اجرا</span> · <kbd>Shift</kbd>+<kbd>Enter</kbd> ↵</span>
+        <button type="button" class="link-btn" id="btnClear"><svg><use href="#i-trash" /></svg><span data-i18n="input.clear">پاک کردن گفتگو</span></button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- ============================================================ *
+   * Settings drawer
+   * ============================================================ -->
+  <div class="scrim" id="scrim" hidden></div>
+
+  <aside class="drawer" id="drawerSettings" aria-hidden="true" role="dialog" aria-labelledby="settingsTitle">
+    <header class="drawer-hdr">
+      <button class="icon-btn" id="btnCloseSettings" data-i18n-aria="a11y.close"><svg><use href="#i-close" /></svg></button>
+      <h2 id="settingsTitle" data-i18n="settings.title">تنظیمات</h2>
+      <span class="drawer-ver" id="versionTag"></span>
+    </header>
+
+    <div class="drawer-body">
+      <!-- ===== AI engine ===== -->
+      <section class="set-group">
+        <h3 class="set-h"><svg><use href="#i-spark" /></svg><span data-i18n="settings.ai">هسته هوش مصنوعی</span></h3>
+
+        <div class="providers" id="providers">
+          <label class="provider">
+            <input type="radio" name="provider" value="ollama" />
+            <span class="provider-card">
+              <span class="provider-top">
+                <span class="provider-name" data-i18n="settings.provider.ollama">Ollama (لوکال — پیش‌فرض)</span>
+                <span class="badge badge-free">۱۰۰٪ رایگان</span>
+              </span>
+              <span class="provider-desc" data-i18n="settings.provider.ollama.desc"></span>
+            </span>
+          </label>
+
+          <label class="provider">
+            <input type="radio" name="provider" value="groq" />
+            <span class="provider-card">
+              <span class="provider-top">
+                <span class="provider-name" data-i18n="settings.provider.groq">Groq (کلید رایگان)</span>
+                <span class="badge badge-key">کلید لازم است</span>
+              </span>
+              <span class="provider-desc" data-i18n="settings.provider.groq.desc"></span>
+            </span>
+          </label>
+
+          <label class="provider">
+            <input type="radio" name="provider" value="gemini" />
+            <span class="provider-card">
+              <span class="provider-top">
+                <span class="provider-name" data-i18n="settings.provider.gemini">Google Gemini (لایه رایگان)</span>
+                <span class="badge badge-key">کلید لازم است</span>
+              </span>
+              <span class="provider-desc" data-i18n="settings.provider.gemini.desc"></span>
+            </span>
+          </label>
+
+          <label class="provider">
+            <input type="radio" name="provider" value="builtin" />
+            <span class="provider-card">
+              <span class="provider-top">
+                <span class="provider-name" data-i18n="settings.provider.builtin">تحلیل‌گر داخلی (بدون مدل)</span>
+                <span class="badge badge-free">آفلاین</span>
+              </span>
+              <span class="provider-desc" data-i18n="settings.provider.builtin.desc"></span>
+            </span>
+          </label>
+        </div>
+
+        <!-- Ollama -->
+        <div class="provider-fields" data-for="ollama">
+          <div class="field">
+            <label for="ollamaUrl" data-i18n="settings.ollamaUrl">آدرس سرور Ollama</label>
+            <input type="text" id="ollamaUrl" dir="ltr" spellcheck="false" placeholder="http://localhost:11434" />
+          </div>
+          <div class="field">
+            <label for="ollamaModel" data-i18n="settings.model">مدل</label>
+            <div class="field-row">
+              <input type="text" id="ollamaModel" dir="ltr" list="ollamaModelList" spellcheck="false" placeholder="llama3.2" />
+              <button type="button" class="btn-mini" id="btnLoadOllamaModels" data-i18n="settings.model.refresh">بارگذاری مجدد مدل‌ها</button>
+            </div>
+            <datalist id="ollamaModelList"></datalist>
+            <p class="hint" id="ollamaModelsHint"></p>
+          </div>
+          <div class="callout">
+            <code>ollama pull llama3.2</code><span>·</span><code>ollama serve</code>
+          </div>
+        </div>
+
+        <!-- Groq -->
+        <div class="provider-fields" data-for="groq">
+          <div class="field">
+            <label for="groqKey" data-i18n="settings.apiKey">کلید API</label>
+            <div class="field-row">
+              <input type="password" id="groqKey" dir="ltr" spellcheck="false" placeholder="gsk_..." autocomplete="off" />
+              <button type="button" class="btn-mini" id="btnGroqKey" data-i18n="settings.getFreeKey">دریافت کلید رایگان</button>
+            </div>
+            <p class="hint" data-i18n="settings.apiKey.hint"></p>
+          </div>
+          <div class="field">
+            <label for="groqModel" data-i18n="settings.model">مدل</label>
+            <input type="text" id="groqModel" dir="ltr" list="groqModelList" spellcheck="false" />
+            <datalist id="groqModelList"></datalist>
+          </div>
+        </div>
+
+        <!-- Gemini -->
+        <div class="provider-fields" data-for="gemini">
+          <div class="field">
+            <label for="geminiKey" data-i18n="settings.apiKey">کلید API</label>
+            <div class="field-row">
+              <input type="password" id="geminiKey" dir="ltr" spellcheck="false" placeholder="AIza..." autocomplete="off" />
+              <button type="button" class="btn-mini" id="btnGeminiKey" data-i18n="settings.getFreeKey">دریافت کلید رایگان</button>
+            </div>
+            <p class="hint" data-i18n="settings.apiKey.hint"></p>
+          </div>
+          <div class="field">
+            <label for="geminiModel" data-i18n="settings.model">مدل</label>
+            <input type="text" id="geminiModel" dir="ltr" list="geminiModelList" spellcheck="false" />
+            <datalist id="geminiModelList"></datalist>
+          </div>
+        </div>
+
+        <div class="conn-result" id="connResult" hidden></div>
+
+        <div class="field">
+          <label for="temperature" data-i18n="settings.temperature">خلاقیت مدل (Temperature)</label>
+          <div class="range-row">
+            <input type="range" id="temperature" min="0" max="1" step="0.05" />
+            <output id="temperatureOut">0.2</output>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="maxResults" data-i18n="settings.maxResults">حداکثر نتایج</label>
+          <input type="number" id="maxResults" min="1" max="24" step="1" />
+        </div>
+      </section>
+
+      <!-- ===== General ===== -->
+      <section class="set-group">
+        <h3 class="set-h"><svg><use href="#i-gear" /></svg><span data-i18n="settings.general">عمومی</span></h3>
+
+        <div class="field">
+          <label for="language" data-i18n="settings.language">زبان رابط کاربری</label>
+          <div class="segmented small" id="langPicker">
+            <button type="button" data-lang="fa">فارسی</button>
+            <button type="button" data-lang="en">English</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="theme" data-i18n="settings.theme">پوسته</label>
+          <div class="segmented small" id="themePicker">
+            <button type="button" data-theme-value="light" data-i18n="settings.theme.light">روشن</button>
+            <button type="button" data-theme-value="dark" data-i18n="settings.theme.dark">تیره</button>
+            <button type="button" data-theme-value="auto" data-i18n="settings.theme.auto">خودکار</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="typingSpeed" data-i18n="settings.typingSpeed">سرعت تایپ انسانی</label>
+          <select id="typingSpeed">
+            <option value="slow" data-i18n="settings.typingSpeed.slow">آهسته و طبیعی</option>
+            <option value="normal" data-i18n="settings.typingSpeed.normal">معمولی</option>
+            <option value="fast" data-i18n="settings.typingSpeed.fast">سریع</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- ===== Behaviour ===== -->
+      <section class="set-group">
+        <h3 class="set-h"><svg><use href="#i-plug" /></svg><span data-i18n="settings.behavior">رفتار</span></h3>
+
+        <label class="switch-row">
+          <span class="switch-text">
+            <strong data-i18n="settings.live">نمایش زنده روی صفحه (HUD)</strong>
+            <small data-i18n="settings.live.desc"></small>
+          </span>
+          <input type="checkbox" id="liveHud" class="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+
+        <label class="switch-row">
+          <span class="switch-text">
+            <strong data-i18n="settings.autoScroll">اسکرول خودکار برای بارگذاری تنبل</strong>
+            <small data-i18n="settings.autoScroll.desc"></small>
+          </span>
+          <input type="checkbox" id="autoScroll" class="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+
+        <label class="switch-row">
+          <span class="switch-text">
+            <strong data-i18n="settings.debug">لاگ‌های دیباگ</strong>
+            <small>console</small>
+          </span>
+          <input type="checkbox" id="debugLogs" class="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </section>
+
+      <!-- ===== Data ===== -->
+      <section class="set-group">
+        <h3 class="set-h"><svg><use href="#i-trash" /></svg><span data-i18n="settings.data">داده‌ها</span></h3>
+        <div class="field-row wrap">
+          <button type="button" class="btn-outline" id="btnDocs" data-i18n="settings.docs">مستندات و راهنمای Ollama</button>
+          <button type="button" class="btn-danger" id="btnReset" data-i18n="settings.reset">بازنشانی</button>
+        </div>
+        <p class="hint" id="aboutNote"></p>
+      </section>
+    </div>
+
+    <footer class="drawer-foot">
+      <button type="button" class="btn-primary block" id="btnSaveSettings" data-i18n="settings.save">ذخیره</button>
+    </footer>
+  </aside>
+
+  <!-- ============================================================ *
+   * Compare drawer
+   * ============================================================ -->
+  <aside class="drawer" id="drawerCompare" aria-hidden="true" role="dialog" aria-labelledby="compareTitle">
+    <header class="drawer-hdr">
+      <button class="icon-btn" id="btnCloseCompare" data-i18n-aria="a11y.close"><svg><use href="#i-close" /></svg></button>
+      <h2 id="compareTitle" data-i18n="results.compareTitle">مقایسه کالاها</h2>
+      <span class="drawer-ver" id="compareCount"></span>
+    </header>
+    <div class="drawer-body" id="compareBody"></div>
+  </aside>
+
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+
+  <script src="shared/utils.js"></script>
+  <script src="shared/locales.js"></script>
+  <script src="shared/i18n.js"></script>
+  <script src="shared/storage.js"></script>
+  <script src="shared/sites.js"></script>
+  <script src="shared/llm.js"></script>
+  <script src="sidepanel/sidepanel.js"></script>
+</body>
+</html>

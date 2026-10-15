@@ -1,0 +1,22 @@
+{
+  "extName": {
+    "message": "ShopAgent | خرید‌یار هوشمند",
+    "description": "Extension name shown in chrome://extensions and the toolbar"
+  },
+  "extShortName": {
+    "message": "ShopAgent",
+    "description": "Short name"
+  },
+  "extDescription": {
+    "message": "AI shopping copilot for Digikala & Basalam. Type in plain Persian, watch it search and read live prices. Free, local Ollama.",
+    "description": "Extension description"
+  },
+  "actionTitle": {
+    "message": "Open ShopAgent",
+    "description": "Toolbar tooltip"
+  },
+  "commandOpen": {
+    "message": "Open the ShopAgent side panel",
+    "description": "Keyboard shortcut description"
+  }
+}
