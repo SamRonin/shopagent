@@ -136,9 +136,15 @@
       if (RIAL_RE.test(tailUnit) || RIAL_RE.test(headUnit)) unit = 'rial';
       else if (TOMAN_RE.test(tailUnit) || TOMAN_RE.test(headUnit)) unit = 'toman';
 
+      // `anchored` = a real currency word sits next to the number. This is
+      // what separates «۳۰۰,۰۰۰ تومان» from a stray «(۶۰)» rating count.
+      const windowText = headUnit + m[0] + tailUnit;
+      const anchored = RIAL_RE.test(windowText) || TOMAN_RE.test(windowText);
+
       out.push({
         value: unit === 'rial' ? Math.round(value / 10) : Math.round(value),
         unit,
+        anchored,
         index: m.index,
         raw: src.slice(m.index, m.index + m[0].length + (multiplier ? 14 : 0)).trim(),
         multiplier,
@@ -152,16 +158,21 @@
   /**
    * Convenience wrapper: return the single best price (in Toman) of a string.
    *
+   * Deliberately strict: numbers outside the plausible product-price range
+   * are dropped, and there is NO fallback to implausible candidates. A
+   * stray «۶۰» from a rating count or a discount badge must never be
+   * reported as a price — returning null is always the safer answer.
+   *
    * @param {string} text
-   * @param {{prefer?:'first'|'max'|'min', min?:number, max?:number}} [opts]
+   * @param {{prefer?:'first'|'max'|'min', min?:number, max?:number, anchoredOnly?:boolean}} [opts]
    * @returns {number|null}
    */
   function parsePrice(text, opts = {}) {
-    const all = extractMoney(text, opts);
+    let all = extractMoney(text, opts);
+    if (opts.anchoredOnly) all = all.filter((c) => c.anchored);
     const lo = opts.min ?? PLausible_MIN;
     const hi = opts.max ?? PLausible_MAX;
-    const plausible = all.filter((c) => c.value >= lo && c.value <= hi);
-    const pool = plausible.length ? plausible : all;
+    const pool = all.filter((c) => c.value >= lo && c.value <= hi);
     if (!pool.length) return null;
     if (opts.prefer === 'max') return pool.reduce((a, b) => (b.value > a.value ? b : a)).value;
     if (opts.prefer === 'min') return pool.reduce((a, b) => (b.value < a.value ? b : a)).value;

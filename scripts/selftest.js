@@ -112,6 +112,17 @@ eq('extractMoney finds two values', all.length, 2);
 eq('first is current price', all[0].value, 3200000);
 eq('second is old price', all[1].value, 4000000);
 
+section('stray-number regressions (issue: 300,000 shown as 60)');
+eq('review count (۶۰) is not a price', utils.parsePrice('(۶۰)'), null);
+eq('discount percent ۶۰٪ is not a price', utils.parsePrice('۶۰٪'), null);
+eq('rating 4.5 is not a price', utils.parsePrice('4.5'), null);
+eq('real price still parses', utils.parsePrice('۳۰۰,۰۰۰'), 300000);
+eq('anchored=true next to currency', utils.extractMoney('۳۰,۰۰۰ تومان')[0].anchored, true);
+eq('anchored=false for bare count', utils.extractMoney('(۱۲۳)')[0].anchored, false);
+eq('anchoredOnly rejects bare counts', utils.parsePrice('(۱۲۴)', { anchoredOnly: true }), null);
+eq('anchoredOnly accepts currency', utils.parsePrice('۱۲۳۴ تومان', { anchoredOnly: true }), 1234);
+eq('rial still converts', utils.parsePrice('۳,۰۰۰,۰۰۰ ریال'), 300000);
+
 /* ------------------------------------------------------------------ *
  * 3. Budget phrases
  * ------------------------------------------------------------------ */

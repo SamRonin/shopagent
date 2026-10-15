@@ -601,38 +601,99 @@
     return 0;
   }
 
+  /* ------------------------------------------------------------------ *
+   * Price extraction — context-aware, never fooled by stray numbers
+   * ------------------------------------------------------------------ */
+
+  /** Elements whose numbers are NOT prices: ratings, discounts, counts… */
+  const PRICE_BAD_RE =
+    /(rating|star|score|review|comment|count|discount|off|badge|tag|view|sold|sale|installment|warranty|timer|time|label|تخفیف|امتیاز|رای|رأی|نظر|دیدگاه|فروش|شگفت|گارانتی|ماه)/i;
+  /** Elements that look like a price container. */
+  const PRICE_HINT_RE = /(price|cost|amount|قیمت|toman|rial|ریال)/i;
+  /** An explicit currency word — the strongest price evidence. */
+  const CURRENCY_RE = /(تومان|تومن|تمن|ریال|toman|rial)/i;
+
+  function elementSignature(el) {
+    if (!el || !el.getAttribute) return '';
+    return `${el.className || ''} ${el.getAttribute('data-testid') || ''} ${el.getAttribute('aria-label') || ''}`;
+  }
+
+  /** True when the element (or a close ancestor) is struck-through. */
+  function struckContext(el, card) {
+    for (let a = el, hops = 0; a && a !== card && hops < 5; a = a.parentElement, hops++) {
+      if (isStruck(a)) return true;
+    }
+    return false;
+  }
+
+  /** True when the element sits inside a rating/discount/count container. */
+  function badPriceContext(el, card) {
+    for (let a = el, hops = 0; a && a !== card && hops < 5; a = a.parentElement, hops++) {
+      if (PRICE_BAD_RE.test(elementSignature(a))) return true;
+    }
+    return false;
+  }
+
   /**
-   * Read a price out of a card, tolerating Rial/Toman, Persian digits,
-   * grouping separators and struck-through "was" prices.
+   * Read the current price (and the struck "was" price) out of a card.
+   *
+   * Candidates are collected from the declared price selectors (or the
+   * whole card as fallback), then ranked in tiers:
+   *   currency-anchored + price-hint  >  currency-anchored  >  price-hint  >  bare
+   * Numbers living inside rating/discount/count containers are discarded,
+   * struck-through values only feed `original`, and implausible values
+   * (< 500 Toman) never qualify at all. This is what stops a «(۶۰)»
+   * review count from being shown as the price of a 300,000 Toman item.
    */
   function extractPrice(card) {
-    let current = null;
+    const candidates = [];
     let original = null;
 
-    const priceNodes = queryAll(adapter.selectors?.productPrice || [], card);
-    const allNodes = priceNodes.length ? priceNodes : [card];
+    const declared = queryAll(adapter.selectors?.productPrice || [], card);
+    const scopes = declared.length ? declared : [card];
 
-    for (const node of allNodes) {
-      const children = node.querySelectorAll('*');
-      for (const el of [node, ...children]) {
+    for (const rootNode of scopes) {
+      const els = [rootNode, ...rootNode.querySelectorAll('*')];
+      for (const el of els) {
         if (!el || el.children.length > 3) continue;
-        const text = (el.textContent || '').trim();
-        if (!text || text.length > 60) continue;
-        const value = parsePrice(text, { prefer: 'first' });
+        const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+        if (!text || text.length > 80) continue;
+
+        const value = parsePrice(text, { prefer: 'first' }); // strict: plausible range only
         if (value === null) continue;
-        if (isStruck(el)) {
+
+        if (isStruck(el) || struckContext(el, card)) {
           if (original === null || value > original) original = value;
           continue;
         }
-        // Prefer the value closest to a "price" labelled container.
-        const cls = `${el.className || ''}`.toLowerCase();
-        const isPriceish = /price|cost|amount|قیمت/.test(cls) || priceNodes.includes(node);
-        if (current === null || (isPriceish && value > current)) current = value;
+        if (badPriceContext(el, card)) continue;
+
+        const sig = elementSignature(el);
+        candidates.push({
+          value,
+          anchored: CURRENCY_RE.test(text),
+          hint: PRICE_HINT_RE.test(sig),
+        });
       }
-      if (current !== null) break;
     }
 
-    if (current === null) current = parsePrice(card.textContent || '', { prefer: 'first' });
+    const tiers = [(c) => c.anchored && c.hint, (c) => c.anchored, (c) => c.hint, () => true];
+    let current = null;
+    for (const test of tiers) {
+      const hit = candidates.find(test);
+      if (hit) {
+        current = hit.value;
+        break;
+      }
+    }
+
+    if (current === null) {
+      // Last resort over the whole card: currency-anchored first.
+      const full = card.textContent || '';
+      current = parsePrice(full, { prefer: 'first', anchoredOnly: true });
+      if (current === null) current = parsePrice(full, { prefer: 'first' });
+    }
+
     if (current !== null && original !== null && original <= current) original = null;
     return { current, original };
   }
@@ -678,7 +739,10 @@
       if (seenTitles.has(titleKey)) continue;
 
       const { current, original } = extractPrice(card);
-      if (current === null) continue; // a card without a readable price cannot be advised on
+      // A card without a readable price cannot be advised on; and a
+      // sub-1,000-Toman "price" is essentially always a stray number
+      // (review counts, percents), never a real product.
+      if (current === null || current < 1000) continue;
 
       seenLinks.add(url);
       seenTitles.add(titleKey);
