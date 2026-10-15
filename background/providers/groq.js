@@ -1,159 +1,141 @@
 /**
  * ShopAgent — background/providers/groq.js
  * ------------------------------------------------------------------
- * Groq client (OpenAI-compatible, free API key, very fast).
- *
- *   complete()  → POST /openai/v1/chat/completions            (stream:false)
- *   stream()    → POST /openai/v1/chat/completions            (stream:true, SSE)
- *
- * The pure SSE/response parsers are exported for scripts/selftest.js.
+ * Groq Cloud client (OpenAI-compatible endpoint, free API key).
+ * Uniform interface: complete() + stream() — stream is SSE based.
  * ------------------------------------------------------------------
  */
 (function (root) {
   'use strict';
   const ShopAgent = (root.ShopAgent = root.ShopAgent || {});
-  const P = ShopAgent.providers;
+  const { makeLineSplitter, parseSseLine } = ShopAgent.sse;
+  const log = ShopAgent.utils.logger('groq');
+
+  const META = {
+    id: 'groq',
+    needsKey: true,
+    local: false,
+    keyUrl: 'https://console.groq.com/keys',
+    defaultModel: 'llama-3.3-70b-versatile',
+    suggestedModels: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'gemma2-9b-it'],
+  };
 
   const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
-  const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
 
-  /** Text of a non-streaming chat-completions response. */
-  function extractText(data) {
-    return data?.choices?.[0]?.message?.content ?? '';
+  function toMessages({ messages, prompt, systemPrompt }) {
+    if (Array.isArray(messages) && messages.length) return messages;
+    const out = [];
+    if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
+    out.push({ role: 'user', content: String(prompt ?? '') });
+    return out;
   }
 
-  /**
-   * One SSE line of a streaming chat-completions response.
-   * `data: [DONE]` terminates the stream.
-   * @returns {{content:string, done:boolean}|null}
-   */
-  function parseStreamLine(line) {
-    const raw = String(line || '').trim();
-    if (!raw.startsWith('data:')) return null;
-    const payload = raw.slice(5).trim();
-    if (!payload) return null;
-    if (payload === '[DONE]') return { content: '', done: true };
-    let json;
-    try {
-      json = JSON.parse(payload);
-    } catch {
-      return null;
-    }
-    const delta = json?.choices?.[0]?.delta?.content;
-    const finish = json?.choices?.[0]?.finish_reason;
-    return { content: typeof delta === 'string' ? delta : '', done: Boolean(finish), error: json?.error ? String(json.error?.message || json.error) : null };
+  function keyOf(settings) {
+    return settings?.groq?.apiKey || '';
   }
 
-  function buildBody({ model, messages, json, temperature, stream }) {
+  function modelOf(settings, override) {
+    return override || settings?.groq?.model || META.defaultModel;
+  }
+
+  function buildBody(opts, stream) {
+    const temperature = opts.temperature ?? opts.settings?.temperature ?? 0.2;
     return {
-      model: model || DEFAULT_MODEL,
-      messages,
-      temperature: Math.min(1, Math.max(0, temperature ?? 0.2)),
-      max_tokens: 1600,
+      model: modelOf(opts.settings, opts.model),
+      messages: toMessages(opts),
+      temperature: Math.min(1, Math.max(0, temperature)),
+      max_tokens: opts.maxTokens || 1600,
       stream,
-      ...(json ? { response_format: { type: 'json_object' } } : {}),
+      ...(opts.json !== false ? { response_format: { type: 'json_object' } } : {}),
     };
   }
 
-  const provider = {
-    id: 'groq',
-    local: false,
-    DEFAULT_MODEL,
-    extractText,
-    parseStreamLine,
-
-    async complete({ prompt, systemPrompt, messages, model, json = true, temperature, timeoutMs = 60000, signal, apiKey } = {}) {
-      if (!apiKey) return { ok: false, error: 'NO_KEY', model: model || DEFAULT_MODEL };
-      const body = buildBody({ model, messages: P.toMessages({ prompt, systemPrompt, messages }), json, temperature, stream: false });
-      const started = Date.now();
-      try {
-        const res = await P.fetchWithTimeout(
-          ENDPOINT,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify(body),
-          },
-          timeoutMs,
-          signal
-        );
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          return { ok: false, error: `HTTP_${res.status}`, detail: String(data?.error?.message || '').slice(0, 300), model: body.model };
-        }
-        const data = await res.json();
-        return { ok: true, text: extractText(data), model: body.model, latencyMs: Date.now() - started };
-      } catch (err) {
-        return { ok: false, error: P.netErrorCode(err), model: body.model, latencyMs: Date.now() - started };
-      }
-    },
-
-    /** Async generator of text deltas (SSE). */
-    async *stream({ prompt, systemPrompt, messages, model, json = false, temperature, timeoutMs = 90000, signal, apiKey } = {}) {
-      if (!apiKey) throw Object.assign(new Error('NO_KEY'), { code: 'NO_KEY' });
-      const body = buildBody({ model, messages: P.toMessages({ prompt, systemPrompt, messages }), json, temperature, stream: true });
-      let res;
-      try {
-        res = await P.fetchWithTimeout(
-          ENDPOINT,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify(body),
-          },
-          timeoutMs,
-          signal
-        );
-      } catch (err) {
-        throw Object.assign(new Error(P.netErrorCode(err)), { code: P.netErrorCode(err) });
-      }
+  async function complete(opts = {}) {
+    const started = Date.now();
+    const key = keyOf(opts.settings);
+    if (!key) return { ok: false, error: 'NO_KEY', provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: 0 };
+    try {
+      const res = await ShopAgent.providers.fetchWithTimeout(
+        ENDPOINT,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify(buildBody(opts, false)),
+        },
+        opts.timeoutMs || 60000,
+        opts.signal
+      );
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw Object.assign(new Error(`HTTP_${res.status}`), { code: `HTTP_${res.status}`, detail: String(data?.error?.message || '').slice(0, 300) });
+        const body = await res.json().catch(() => ({}));
+        return { ok: false, error: body?.error?.message || `Groq HTTP ${res.status}`, provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started, status: res.status };
+      }
+      const data = await res.json();
+      return { ok: true, text: data?.choices?.[0]?.message?.content ?? '', provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started };
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err), provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started };
+    }
+  }
+
+  /** SSE streaming: lines of `data: {"choices":[{"delta":{"content":"…"}}]}`. */
+  async function stream(opts = {}) {
+    const started = Date.now();
+    const onDelta = typeof opts.onDelta === 'function' ? opts.onDelta : () => {};
+    const key = keyOf(opts.settings);
+    if (!key) return { ok: false, error: 'NO_KEY', provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: 0 };
+    try {
+      const res = await ShopAgent.providers.fetchWithTimeout(
+        ENDPOINT,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify(buildBody(opts, true)),
+        },
+        opts.timeoutMs || 90000,
+        opts.signal
+      );
+      if (!res.ok || !res.body) {
+        const body = res.body ? await res.text().catch(() => '') : 'NO_STREAM_BODY';
+        return { ok: false, error: `Groq HTTP ${res.status}: ${body.slice(0, 200)}`, provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started, status: res.status };
       }
 
-      const queue = [];
-      let wake = null;
-      let failure = null;
-      let finished = false;
-      const flush = () => {
-        if (wake) {
-          wake();
-          wake = null;
-        }
-      };
-
-      const pump = P.consumeStream(res.body, (line) => {
-        const chunk = parseStreamLine(line);
-        if (!chunk) return;
-        if (chunk.error) {
-          failure = Object.assign(new Error('STREAM_ERROR'), { code: 'STREAM_ERROR', detail: chunk.error });
-          return;
-        }
-        if (chunk.content) queue.push(chunk.content);
-        if (chunk.done) finished = true;
-      })
-        .then(() => {
-          finished = true;
-          flush();
-        })
-        .catch((err) => {
-          failure = err;
-          finished = true;
-          flush();
-        });
-
+      const splitter = makeLineSplitter();
+      const reader = res.body.getReader();
+      let full = '';
+      let firstTokenMs = null;
       for (;;) {
-        while (queue.length) yield queue.shift();
-        if (failure) throw failure;
-        if (finished) return;
-        await new Promise((resolve) => {
-          wake = resolve;
-        });
-        if (failure && !queue.length) throw failure;
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const line of splitter.push(value)) {
+          const payload = parseSseLine(line);
+          if (!payload) continue;
+          const tok = payload?.choices?.[0]?.delta?.content;
+          if (typeof tok === 'string' && tok.length) {
+            if (firstTokenMs === null) firstTokenMs = Date.now() - started;
+            full += tok;
+            onDelta(tok, { full, firstTokenMs });
+          }
+        }
       }
-    },
-  };
+      return { ok: true, text: full, provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started, firstTokenMs };
+    } catch (err) {
+      log.warn('stream failed', err?.message || err);
+      return { ok: false, error: String(err?.message || err), provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started };
+    }
+  }
 
-  P.register('groq', provider);
+  async function health(settings, signal) {
+    const started = Date.now();
+    const key = keyOf(settings);
+    if (!key) return { ok: false, provider: META.id, latencyMs: 0, models: [], message: 'NO_KEY' };
+    try {
+      const res = await ShopAgent.providers.fetchWithTimeout('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${key}` } }, 6000, signal);
+      if (!res.ok) return { ok: false, provider: META.id, latencyMs: Date.now() - started, models: [], message: `HTTP ${res.status}` };
+      const data = await res.json();
+      return { ok: true, provider: META.id, latencyMs: Date.now() - started, models: (data?.data || []).map((m) => m.id).filter(Boolean), message: 'ok' };
+    } catch (err) {
+      return { ok: false, provider: META.id, latencyMs: Date.now() - started, models: [], message: String(err?.message || err) };
+    }
+  }
+
+  ShopAgent.providers.groq = { META, complete, stream, health };
 })(globalThis);

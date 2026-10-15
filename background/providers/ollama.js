@@ -1,180 +1,155 @@
 /**
  * ShopAgent — background/providers/ollama.js
  * ------------------------------------------------------------------
- * Ollama client (local, offline, zero cost).
+ * Client for a local Ollama server (default http://localhost:11434).
  *
- *   complete()  → POST {base}/api/chat            (stream:false)
- *   stream()    → POST {base}/api/chat            (stream:true, NDJSON)
- *   ping()      → GET  {base}/api/tags            (reachability + models)
- *
- * The pure line/response parsers are exported so scripts/selftest.js
- * can verify the wire format without a running Ollama.
+ * Uniform provider interface:
+ *   complete({ messages | prompt+systemPrompt, model, json, temperature,
+ *              timeoutMs, signal, settings }) → { ok, text?, error?, ... }
+ *   stream({ ..., onDelta })                      → same result shape,
+ *              calling onDelta(deltaText) as NDJSON tokens arrive.
  * ------------------------------------------------------------------
  */
 (function (root) {
   'use strict';
   const ShopAgent = (root.ShopAgent = root.ShopAgent || {});
-  const P = ShopAgent.providers;
+  const { makeLineSplitter } = ShopAgent.sse;
+  const log = ShopAgent.utils.logger('ollama');
 
-  const DEFAULT_BASE = 'http://localhost:11434';
+  const META = {
+    id: 'ollama',
+    needsKey: false,
+    local: true,
+    keyUrl: null,
+    defaultModel: 'llama3.2',
+    suggestedModels: ['llama3.2', 'llama3.1:8b', 'qwen2.5:7b', 'qwen2.5:3b', 'mistral', 'gemma2:9b', 'phi3'],
+    install: 'ollama pull llama3.2',
+  };
 
-  function resolveBase(baseUrl) {
-    const raw = String(baseUrl || DEFAULT_BASE).trim().replace(/\/+$/, '');
+  /** Normalised base URL without trailing slashes. */
+  function baseUrl(settings) {
+    const raw = (settings?.ollama?.baseUrl || 'http://localhost:11434').trim().replace(/\/+$/, '');
     return /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
   }
 
-  /** Text of a non-streaming /api/chat response. */
-  function extractText(data) {
-    return data?.message?.content ?? '';
+  function modelOf(settings, override) {
+    return override || settings?.ollama?.model || META.defaultModel;
+  }
+
+  /** {prompt, systemPrompt} sugar → messages array (uniform interface). */
+  function toMessages({ messages, prompt, systemPrompt }) {
+    if (Array.isArray(messages) && messages.length) return messages;
+    const out = [];
+    if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
+    out.push({ role: 'user', content: String(prompt ?? '') });
+    return out;
+  }
+
+  function buildBody(opts, stream) {
+    const messages = toMessages(opts);
+    const temperature = opts.temperature ?? opts.settings?.temperature ?? 0.2;
+    return {
+      model: modelOf(opts.settings, opts.model),
+      messages,
+      stream,
+      ...(opts.json !== false ? { format: 'json' } : {}),
+      keep_alive: opts.settings?.ollama?.keepAlive || '10m',
+      options: { temperature, num_ctx: 8192, top_p: 0.9 },
+    };
+  }
+
+  async function complete(opts = {}) {
+    const base = baseUrl(opts.settings);
+    const started = Date.now();
+    try {
+      const res = await ShopAgent.providers.fetchWithTimeout(
+        `${base}/api/chat`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody(opts, false)),
+        },
+        opts.timeoutMs || 60000,
+        opts.signal
+      );
+      if (!res.ok) {
+        const body = (await res.text().catch(() => '')).slice(0, 200);
+        return { ok: false, error: `Ollama HTTP ${res.status}: ${body}`, provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started, status: res.status };
+      }
+      const data = await res.json();
+      return { ok: true, text: data?.message?.content ?? '', provider: META.id, model: data?.model || modelOf(opts.settings, opts.model), latencyMs: Date.now() - started };
+    } catch (err) {
+      const aborted = ShopAgent.errors.classify(err, { provider: META.id }) === ShopAgent.errors.KINDS.ABORTED;
+      return { ok: false, error: aborted ? 'TIMEOUT' : String(err?.message || err), provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started };
+    }
   }
 
   /**
-   * One NDJSON line of a streaming /api/chat response.
-   * @returns {{content:string, done:boolean}|null}
+   * Streaming chat. Ollama emits NDJSON lines:
+   *   {"message":{"content":"tok"},"done":false} … {"done":true}
    */
-  function parseStreamLine(line) {
-    let json;
+  async function stream(opts = {}) {
+    const base = baseUrl(opts.settings);
+    const started = Date.now();
+    const onDelta = typeof opts.onDelta === 'function' ? opts.onDelta : () => {};
     try {
-      json = JSON.parse(line);
-    } catch {
-      return null;
-    }
-    if (!json || typeof json !== 'object') return null;
-    return {
-      content: json.message?.content ?? '',
-      done: json.done === true,
-      error: json.error ? String(json.error) : null,
-    };
-  }
-
-  function buildBody({ model, messages, json, temperature, keepAlive, stream }) {
-    return {
-      model: model || 'llama3.2',
-      messages,
-      stream,
-      ...(json ? { format: 'json' } : {}),
-      keep_alive: keepAlive || '10m',
-      options: { temperature: temperature ?? 0.2, num_ctx: 8192, top_p: 0.9 },
-    };
-  }
-
-  const provider = {
-    id: 'ollama',
-    local: true,
-    DEFAULT_BASE,
-    resolveBase,
-    extractText,
-    parseStreamLine,
-
-    async complete({ prompt, systemPrompt, messages, model, json = true, temperature, timeoutMs = 60000, signal, baseUrl, keepAlive } = {}) {
-      const base = resolveBase(baseUrl);
-      const body = buildBody({ model, messages: P.toMessages({ prompt, systemPrompt, messages }), json, temperature, keepAlive, stream: false });
-      const started = Date.now();
-      try {
-        const res = await P.fetchWithTimeout(
-          `${base}/api/chat`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          },
-          timeoutMs,
-          signal
-        );
-        if (!res.ok) {
-          const detail = await res.text().catch(() => '');
-          return { ok: false, error: res.status === 404 ? 'MODEL_MISSING' : `HTTP_${res.status}`, detail: detail.slice(0, 300), model: body.model };
-        }
-        const data = await res.json();
-        return { ok: true, text: extractText(data), model: body.model, latencyMs: Date.now() - started };
-      } catch (err) {
-        return { ok: false, error: P.netErrorCode(err), model: body.model, latencyMs: Date.now() - started };
-      }
-    },
-
-    /** Async generator of text deltas (NDJSON). */
-    async *stream({ prompt, systemPrompt, messages, model, json = false, temperature, timeoutMs = 90000, signal, baseUrl, keepAlive } = {}) {
-      const base = resolveBase(baseUrl);
-      const body = buildBody({ model, messages: P.toMessages({ prompt, systemPrompt, messages }), json, temperature, keepAlive, stream: true });
-      let res;
-      try {
-        res = await P.fetchWithTimeout(
-          `${base}/api/chat`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          },
-          timeoutMs,
-          signal
-        );
-      } catch (err) {
-        throw Object.assign(new Error(P.netErrorCode(err)), { code: P.netErrorCode(err) });
-      }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        const code = res.status === 404 ? 'MODEL_MISSING' : `HTTP_${res.status}`;
-        throw Object.assign(new Error(code), { code, detail: detail.slice(0, 300) });
+      const res = await ShopAgent.providers.fetchWithTimeout(
+        `${base}/api/chat`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody(opts, true)),
+        },
+        opts.timeoutMs || 90000,
+        opts.signal
+      );
+      if (!res.ok || !res.body) {
+        const body = res.body ? (await res.text().catch(() => '')).slice(0, 200) : 'NO_STREAM_BODY';
+        return { ok: false, error: `Ollama HTTP ${res.status}: ${body}`, provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started, status: res.status };
       }
 
-      // consumeStream is callback-based; bridge it into a generator with
-      // a small queue so deltas flow out as they arrive (low TTFT).
-      const queue = [];
-      let wake = null;
-      let failure = null;
-      let finished = false;
-      const flush = () => {
-        if (wake) {
-          wake();
-          wake = null;
-        }
-      };
-
-      const pump = P.consumeStream(res.body, (line) => {
-        const chunk = parseStreamLine(line);
-        if (!chunk) return;
-        if (chunk.error) {
-          failure = Object.assign(new Error('STREAM_ERROR'), { code: 'STREAM_ERROR', detail: chunk.error });
-          return;
-        }
-        if (chunk.content) queue.push(chunk.content);
-      })
-        .then(() => {
-          finished = true;
-          flush();
-        })
-        .catch((err) => {
-          failure = err;
-          finished = true;
-          flush();
-        });
-
+      const splitter = makeLineSplitter();
+      const reader = res.body.getReader();
+      let full = '';
+      let firstTokenMs = null;
       for (;;) {
-        while (queue.length) yield queue.shift();
-        if (failure) throw failure;
-        if (finished) return;
-        await new Promise((resolve) => {
-          wake = resolve;
-        });
-        if (failure && !queue.length) throw failure;
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const line of splitter.push(value)) {
+          let payload;
+          try {
+            payload = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const tok = payload?.message?.content;
+          if (typeof tok === 'string' && tok.length) {
+            if (firstTokenMs === null) firstTokenMs = Date.now() - started;
+            full += tok;
+            onDelta(tok, { full, firstTokenMs });
+          }
+        }
       }
-    },
+      return { ok: true, text: full, provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started, firstTokenMs };
+    } catch (err) {
+      log.warn('stream failed', err?.message || err);
+      return { ok: false, error: String(err?.message || err), provider: META.id, model: modelOf(opts.settings, opts.model), latencyMs: Date.now() - started };
+    }
+  }
 
-    /** Reachability probe used by the side-panel status banner. */
-    async ping(baseUrl, { timeoutMs = 4000, signal } = {}) {
-      const base = resolveBase(baseUrl);
-      const started = Date.now();
-      try {
-        const res = await P.fetchWithTimeout(`${base}/api/tags`, { method: 'GET' }, timeoutMs, signal);
-        if (!res.ok) return { ok: false, online: false, error: `HTTP_${res.status}`, latencyMs: Date.now() - started, models: [] };
-        const data = await res.json();
-        const models = (data?.models || []).map((m) => m.name || m.model).filter(Boolean);
-        return { ok: true, online: true, models, latencyMs: Date.now() - started };
-      } catch (err) {
-        return { ok: false, online: false, error: P.netErrorCode(err), latencyMs: Date.now() - started, models: [] };
-      }
-    },
-  };
+  /** Cheap health probe: list installed models. */
+  async function health(settings, signal) {
+    const started = Date.now();
+    try {
+      const res = await ShopAgent.providers.fetchWithTimeout(`${baseUrl(settings)}/api/tags`, { method: 'GET' }, 3500, signal);
+      if (!res.ok) return { ok: false, provider: META.id, latencyMs: Date.now() - started, models: [], message: `HTTP ${res.status}` };
+      const data = await res.json();
+      const models = (data?.models || []).map((m) => m.name || m.model).filter(Boolean);
+      return { ok: true, provider: META.id, latencyMs: Date.now() - started, models, message: 'ok' };
+    } catch (err) {
+      return { ok: false, provider: META.id, latencyMs: Date.now() - started, models: [], message: String(err?.message || err) };
+    }
+  }
 
-  P.register('ollama', provider);
+  ShopAgent.providers.ollama = { META, baseUrl, complete, stream, health };
 })(globalThis);

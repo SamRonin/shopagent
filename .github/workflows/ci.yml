@@ -31,8 +31,8 @@ jobs:
       - name: Shared-module self tests
         run: node scripts/selftest.js
 
-      - name: Protocol integration tests (stubbed chrome)
-        run: node scripts/protocol.test.js
+      - name: Node Test Runner suite (parser / schema / guardrails / stream / load)
+        run: node --test "tests/*.test.js"
 
       - name: Cross-file consistency (manifest / html / i18n / messages)
         run: node scripts/validate.js

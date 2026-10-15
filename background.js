@@ -1,606 +1,82 @@
 /**
  * ShopAgent — background.js (MV3 service worker)
  * ------------------------------------------------------------------
- * The orchestrator. It owns:
+ * Thin composition root. It wires the modules together:
  *
- *   • tab lifecycle (pick / open / focus the right store tab)
- *   • content-script injection + a resilient PING/ACK handshake
- *   • the task pipeline: intent → navigate → type → scroll → filter →
- *     extract → rank → (optional) confirmed action
- *   • all model traffic through background/providers/* (host
- *     permissions live here, so the side panel and content scripts
- *     never have to deal with CORS)
- *   • token streaming (SHOPAGENT_STREAM) for low-TTFT answers
- *   • Human-in-the-Loop confirmations (SHOPAGENT_CONFIRM_REQUEST)
- *   • progress broadcasting to the side panel + toolbar badge
- *   • a keep-alive heartbeat so the SW survives long LLM calls
+ *   background/core.js       tasks, progress, badge, keep-alive, stream relay
+ *   background/tabs.js       tab lifecycle + the results-page hard gate
+ *   background/pipeline.js   the intent→…→rank pipeline, chat, add-to-cart
+ *   background/providers/*   Ollama / Groq / Gemini (uniform interface)
  *
- * Loaded as a classic worker; shared modules come in via importScripts.
+ * What stays here: the confirm (HITL) relay and the message router.
+ * Loaded as a classic worker; modules come in via importScripts.
  * ------------------------------------------------------------------
  */
 
 importScripts(
   'shared/utils.js',
-  'shared/errors.js',
-  'shared/act.js',
   'shared/locales.js',
   'shared/i18n.js',
   'shared/storage.js',
   'shared/sites.js',
-  'content/adapters/digikala.js',
-  'content/adapters/basalam.js',
-  'content/adapters/index.js',
-  'background/providers/index.js',
+  'shared/json.js',
+  'shared/schema.js',
+  'shared/guardrails.js',
+  'shared/errors.js',
+  'background/providers/sse.js',
   'background/providers/ollama.js',
   'background/providers/groq.js',
   'background/providers/gemini.js',
-  'shared/llm.js'
+  'background/providers/index.js',
+  'shared/llm.js',
+  'background/core.js',
+  'background/tabs.js',
+  'background/pipeline.js'
 );
 
 const SA = globalThis.ShopAgent;
+const bg = SA.bg;
 const log = SA.utils.logger('background');
 
-/** Hosts we are allowed to automate. Mirrors manifest.content_scripts.matches. */
-const SUPPORTED_HOSTS = ['digikala.com', 'basalam.com'];
-
-const CONTENT_FILES = ['shared/utils.js', 'shared/sites.js', 'content/adapters/digikala.js', 'content/adapters/basalam.js', 'content/adapters/index.js', 'content/actions/dom.js', 'content/actions/interact.js', 'content/actions/extract.js', 'content/actions/hud.js', 'content/content.js'];
-const CONTENT_CSS = ['content/content.css'];
-
 /* ================================================================== *
- * Task state
+ * Human-in-the-Loop confirmation relay (content ⇄ background ⇄ panel)
  * ================================================================== */
 
-const tasks = new Map(); // taskId → { status, abort, startedAt, ... }
+const pendingConfirms = new Map(); // requestId → resolve
 
-function newTask() {
-  const id = SA.utils.uid('task');
-  const abort = new AbortController();
-  tasks.set(id, { id, status: 'idle', abort, startedAt: Date.now(), steps: [] });
-  return id;
-}
-
-function getTask(id) {
-  return tasks.get(id);
-}
-
-function pruneTasks() {
-  const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [id, t] of tasks) if (t.startedAt < cutoff) tasks.delete(id);
-}
-
-/** Broadcast a progress event to every listening extension surface. */
-function emitProgress(taskId, status, detail, extra = {}) {
-  const task = getTask(taskId);
-  if (task) {
-    task.status = status;
-    task.steps.push({ status, detail, at: Date.now() });
-    if (task.steps.length > 60) task.steps.shift();
-  }
-  const payload = { type: 'SHOPAGENT_PROGRESS', taskId, status, detail, at: Date.now(), ...extra };
-  chrome.runtime.sendMessage(payload).catch(() => {});
-  setBadge(status);
-  log.info(`[${taskId}] ${status}${detail ? ` — ${detail}` : ''}`);
-}
-
-/** Emit a failure with provider-aware, user-language guidance. */
-function emitFail(taskId, code, lang, extra = {}) {
-  const detail = SA.errors.describe(code, { lang, provider: extra.provider });
-  emitProgress(taskId, 'error', detail, { errorCode: SA.errors.codeOf(code), ...extra });
-  return detail;
-}
-
-const BADGE = {
-  idle: { text: '', color: '#0f766e' },
-  thinking: { text: '···', color: '#0ea5e9' },
-  navigating: { text: '→', color: '#8b5cf6' },
-  typing: { text: '⌨', color: '#38bdf8' },
-  scrolling: { text: '⇕', color: '#a78bfa' },
-  analyzing: { text: '◎', color: '#f59e0b' },
-  filtering: { text: '⚙', color: '#ec4899' },
-  ranking: { text: '★', color: '#22c55e' },
-  ready: { text: '✓', color: '#16a34a' },
-  error: { text: '!', color: '#ef4444' },
-  stopped: { text: '■', color: '#64748b' },
-};
-
-function setBadge(status) {
-  const b = BADGE[status] || BADGE.idle;
-  try {
-    chrome.action.setBadgeText({ text: b.text }).catch(() => {});
-    chrome.action.setBadgeBackgroundColor({ color: b.color }).catch(() => {});
-  } catch {}
-}
-
-/* ================================================================== *
- * Keep-alive: MV3 kills idle service workers after ~30 s. Extension API
- * calls reset that timer, so we tick one while a task is in flight.
- * ================================================================== */
-
-let keepAliveTimer = null;
-
-function startKeepAlive() {
-  if (keepAliveTimer) return;
-  keepAliveTimer = setInterval(() => {
-    chrome.storage.local.get('__ka').catch(() => {});
-    if (!tasks.size) stopKeepAlive();
-  }, 20000);
-  pruneTasks();
-}
-
-function stopKeepAlive() {
-  if (keepAliveTimer) {
-    clearInterval(keepAliveTimer);
-    keepAliveTimer = null;
-  }
-}
-
-/* ================================================================== *
- * Tabs
- * ================================================================== */
-
-async function activeTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  return tab || null;
-}
-
-function hostOf(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return '';
-  }
-}
-
-function adapterFor(url) {
-  return SA.sites.detect(url);
-}
-
-function isSupported(url) {
-  const host = hostOf(url || '');
-  if (!host || !/^https?:/i.test(url || '')) return false;
-  return SUPPORTED_HOSTS.some((s) => host === s || host.endsWith('.' + s));
-}
-
-/** Find (or create) a tab for the requested store. */
-async function resolveTab(store, { focus = true } = {}) {
-  const current = await activeTab();
-
-  if (store === 'current') {
-    if (!current) throw new Error('NO_TAB');
-    return { tab: current, created: false };
-  }
-
-  const wanted = SA.sites.byId(store);
-  const wantedHosts = wanted.hosts || [];
-
-  // 1. The active tab is already the right store.
-  if (current && wantedHosts.some((h) => hostOf(current.url || '').endsWith(h))) {
-    return { tab: current, created: false };
-  }
-
-  // 2. Another tab already has it open.
-  const all = await chrome.tabs.query({});
-  const existing = all.find((t) => wantedHosts.some((h) => hostOf(t.url || '').endsWith(h)));
-  if (existing) {
-    if (focus) await chrome.tabs.update(existing.id, { active: true }).catch(() => {});
-    if (existing.windowId != null) await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
-    return { tab: existing, created: false };
-  }
-
-  // 3. Open a fresh tab.
-  const url = wanted.home || 'https://www.digikala.com/';
-  const tab = await chrome.tabs.create({ url, active: focus });
-  return { tab, created: true };
-}
-
-async function waitForTab(tabId, { timeout = 25000 } = {}) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab) throw new Error('TAB_GONE');
-    if (tab.status === 'complete') return tab;
-    await SA.utils.sleep(250);
-  }
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab) return tab;
-  throw new Error('TAB_TIMEOUT');
-}
-
-/** Make sure the content script is alive on the tab; inject if needed. */
-async function ensureContent(tabId, { retries = 3 } = {}) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const res = await sendToContent(tabId, 'PING');
-      if (res && res.ok) return res;
-    } catch (e) {
-      log.debug('ping failed', e?.message);
-    }
-    if (attempt === retries) break;
-    try {
-      await chrome.scripting.insertCSS({ target: { tabId }, files: CONTENT_CSS }).catch(() => {});
-      await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
-      await SA.utils.sleep(350);
-    } catch (e) {
-      log.warn('injection failed', e?.message);
-      if (attempt === retries) throw new Error(`INJECT_FAILED:${e?.message || e}`);
-    }
-  }
-  throw new Error('CONTENT_UNREACHABLE');
-}
-
-function sendToContent(tabId, action, payload = {}, timeoutMs = 90000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`TIMEOUT:${action}`)), timeoutMs);
-    chrome.tabs.sendMessage(tabId, { type: `SHOPAGENT_${action}`, payload }, (response) => {
-      clearTimeout(timer);
-      const err = chrome.runtime.lastError;
-      if (err) return reject(new Error(err.message || 'NO_RECEIVER'));
-      resolve(response);
-    });
-  });
-}
-
-/** Ask the page where we are; degrade to URL-only classification. */
-async function pageKindOf(tab) {
-  try {
-    const k = await sendToContent(tab.id, 'PAGE_KIND', {}, 15000);
-    if (k && k.ok) return k;
-  } catch (e) {
-    log.debug('PAGE_KIND unreachable', e?.message);
-  }
-  const cls = SA.sites.classifyUrl(tab.url || '');
-  return { ok: true, url: tab.url, home: cls.home, resultsUrl: cls.results, resultsDom: false, results: cls.results, unreachable: true };
-}
-
-/**
- * HARD GUARANTEE: no scrolling / extraction may happen unless the tab is
- * showing a genuine search-results listing.
- *   1. the live SEARCH already landed on a results URL  → done
- *   2. the tab is already on a results URL (refining)   → done
- *   3. otherwise navigate to the adapter's search URL   → verify again
- *
- * This is what prevents the old failure mode where a submit no-op left
- * the run scrolling the Digikala homepage.
- */
-async function ensureOnResultsPage(tab, adapter, settings, { liveSearch, templates, onStatus } = {}) {
-  const lang = settings.language || 'fa';
-
-  if (liveSearch && liveSearch.ok && liveSearch.resultsPage) return { ok: true, tab };
-
-  let kind = await pageKindOf(tab);
-  if (kind.results) return { ok: true, tab };
-
-  const target = templates && templates.length ? templates[0] : null;
-  if (!target) {
-    // Unknown store: the live submit was our only chance.
-    return kind.results ? { ok: true, tab } : { ok: false, error: 'NO_SEARCH_PATH', tab };
-  }
-
-  onStatus?.('navigating', lang === 'fa' ? 'رفتن مستقیم به صفحهٔ نتایج جستجو' : 'Going straight to the search results');
-  await chrome.tabs.update(tab.id, { url: target });
-  tab = await waitForTab(tab.id, { timeout: 30000 });
-  await ensureContent(tab.id);
-  await SA.utils.sleep(900);
-
-  kind = await pageKindOf(tab);
-  if (kind.results) return { ok: true, tab };
-
-  // One retry with the adapter's second URL template.
-  if (templates[1]) {
-    await chrome.tabs.update(tab.id, { url: templates[1] });
-    tab = await waitForTab(tab.id, { timeout: 30000 });
-    await ensureContent(tab.id);
-    await SA.utils.sleep(900);
-    kind = await pageKindOf(tab);
-    if (kind.results) return { ok: true, tab };
-  }
-
-  return { ok: false, error: 'NOT_ON_RESULTS_PAGE', tab };
-}
-
-/* ================================================================== *
- * Human-in-the-Loop confirmations
- * ================================================================== */
-
-const pendingConfirms = new Map(); // confirmId → { action, params, product, taskId, tabId, resolve, timer }
-
-/**
- * Ask the side panel to approve a `confirm`-risk action.
- * @returns {{id:string, promise:Promise<{approved:boolean, result?:object}>}}
- */
-function requestConfirmation({ action, params, product, taskId, tabId }) {
-  const id = SA.utils.uid('confirm');
-  let resolve;
-  const promise = new Promise((r) => {
-    resolve = r;
-  });
-  const timer = setTimeout(() => {
-    if (!pendingConfirms.has(id)) return;
-    pendingConfirms.delete(id);
-    broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id, ok: false, error: 'ACTION_UNCONFIRMED' });
-    resolve({ approved: false, error: 'ACTION_UNCONFIRMED' });
-  }, 180000);
-
-  pendingConfirms.set(id, { action, params, product, taskId, tabId, resolve, timer });
-
-  const fa = SA.act.buildConfirmation(action, { ...params, productTitle: product?.title }, 'fa');
-  const en = SA.act.buildConfirmation(action, { ...params, productTitle: product?.title }, 'en');
-  broadcast({ type: 'SHOPAGENT_CONFIRM_REQUEST', id, action, params, product: product ? { title: product.title, url: product.url, price: product.price } : null, fa, en });
-  return { id, promise };
-}
-
-/** Execute a validated action on a tab (safe actions only reach here). */
-async function executeActionOnTab(verdict, tabId, product) {
-  const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : await activeTab();
-  if (!tab) return { ok: false, error: 'NO_TAB' };
-
-  if (verdict.action === 'OPEN_PRODUCT') {
-    await chrome.tabs.update(tab.id, { url: verdict.params.url, active: true }).catch(() => {});
-    return { ok: true, action: 'OPEN_PRODUCT', url: verdict.params.url };
-  }
-
-  // ADD_TO_CART only makes sense on the product page: open it first.
-  if (verdict.action === 'ADD_TO_CART') {
-    const url = verdict.params.url || product?.url;
-    if (url) {
-      const current = hostOf(tab.url || '');
-      const target = hostOf(url);
-      if (!current || !target || current !== target || !/\/(product|p)\//i.test(tab.url || '')) {
-        await chrome.tabs.update(tab.id, { url, active: true }).catch(() => {});
-        await waitForTab(tab.id, { timeout: 30000 }).catch(() => {});
-        await SA.utils.sleep(600);
+function relayConfirm(msg) {
+  const requestId = msg.requestId || SA.utils.uid('cf');
+  return new Promise((resolve) => {
+    pendingConfirms.set(requestId, resolve);
+    // 90 s of silence counts as a "no" — never leave the page hanging.
+    setTimeout(() => {
+      if (pendingConfirms.has(requestId)) {
+        pendingConfirms.delete(requestId);
+        resolve({ approved: false, timeout: true });
       }
-    }
-  }
-
-  try {
-    await ensureContent(tab.id);
-    const res = await sendToContent(tab.id, 'ACT', { action: verdict.action, params: verdict.params });
-    return { ok: Boolean(res?.ok), action: verdict.action, result: res, error: res?.ok ? null : res?.error || 'ACTION_FAILED' };
-  } catch (err) {
-    return { ok: false, action: verdict.action, error: String(err?.message || err) };
-  }
-}
-
-/* ================================================================== *
- * The pipeline
- * ================================================================== */
-
-async function runTask(taskId, { text, store, tabId, settings }) {
-  const task = getTask(taskId);
-  if (!task) throw new Error('NO_TASK');
-  const signal = task.abort.signal;
-  const startedAt = Date.now();
-  const lang = settings.language || 'fa';
-
-  startKeepAlive();
-
-  try {
-    /* ---------- 1. Understand the request ---------- */
-    emitProgress(taskId, 'thinking', lang === 'fa' ? 'دستورت رو تحلیل می‌کنم…' : 'Understanding your request…');
-    const intent = await SA.llm.parseIntent(text, settings, { signal });
-    emitProgress(taskId, 'thinking', intent.explanation || intent.query, { intent });
-
-    if (intent.degraded) {
-      emitProgress(taskId, 'thinking', SA.errors.describe('BAD_JSON', { lang }), { degraded: intent.degradedReason });
-    }
-
-    if (intent.intent === 'unknown' || !intent.query) {
-      emitFail(taskId, 'EMPTY_QUERY', lang);
-      return { ok: false, error: 'EMPTY_QUERY', intent, products: [] };
-    }
-
-    /* ---------- 1b. Pure question → streamed answer, no scraping ---------- */
-    if (intent.intent === 'question') {
-      emitProgress(taskId, 'thinking', lang === 'fa' ? 'دارم جواب می‌دم…' : 'Answering…');
-      const messages = [
-        {
-          role: 'system',
-          content:
-            lang === 'fa'
-              ? 'تو دستیار «خرید‌یار» هستی. کوتاه، دقیق و به فارسی جواب بده. هرگز نگو پرداخت یا ثبت سفارش را انجام می‌دهی؛ این کارها فقط توسط خود کاربر در سایت انجام می‌شوند.'
-              : 'You are the ShopAgent assistant. Answer briefly and precisely. Never claim to pay or place orders — the user does those on the site.',
-        },
-        { role: 'user', content: text },
-      ];
-      let streamed = '';
-      const res = await SA.llm.streamChat(settings, {
-        messages,
-        signal,
-        onDelta: (delta) => {
-          // Accumulate here: providers only guarantee the delta itself.
-          streamed += delta || '';
-          broadcast({ type: 'SHOPAGENT_STREAM', taskId, kind: 'delta', text: streamed });
-        },
+    }, 90000);
+    chrome.runtime
+      .sendMessage({
+        type: 'SHOPAGENT_CONFIRM_SHOW',
+        requestId,
+        title: msg.title || '',
+        detail: msg.detail || '',
+        risk: msg.risk || 'confirm',
+        url: msg.url || '',
+        matched: msg.matched || '',
+      })
+      .catch(() => {
+        pendingConfirms.delete(requestId);
+        resolve({ approved: false, reason: 'NO_PANEL' });
       });
-      const answer = streamed || res.text || '';
-      broadcast({ type: 'SHOPAGENT_STREAM', taskId, kind: res.ok ? 'done' : 'error', text: answer, error: res.ok ? null : SA.errors.describe(res.error, { lang, provider: settings.provider }) });
-      if (!res.ok && !answer) {
-        emitFail(taskId, res.error, lang, { provider: settings.provider });
-        return { ok: false, error: res.error, intent, products: [] };
-      }
-      emitProgress(taskId, 'ready', lang === 'fa' ? 'پاسخ آماده است' : 'Answer ready', { answer });
-      return { ok: true, intent, answer, question: true, taskId, query: text, at: Date.now() };
-    }
+  });
+}
 
-    /* ---------- 2. Resolve the tab ---------- */
-    const wantedStore = intent.targetStore || store || settings.preferredStore || 'digikala';
-    emitProgress(taskId, 'navigating', lang === 'fa' ? `باز کردن ${wantedStore === 'basalam' ? 'باسلام' : 'دیجی‌کالا'}` : `Opening ${wantedStore}`);
-
-    let tab;
-    try {
-      const resolved = await resolveTab(wantedStore);
-      tab = tabId ? await chrome.tabs.get(tabId).catch(() => resolved.tab) : resolved.tab;
-      tab = await waitForTab(tab.id);
-    } catch (e) {
-      emitFail(taskId, String(e.message || e), lang);
-      return { ok: false, error: 'TAB_ERROR', detail: String(e.message || e), intent, products: [] };
-    }
-
-    // Re-read settings in case they changed mid-flight.
-    await sendToContent(tab.id, 'SYNC_SETTINGS', {
-      settings: {
-        typingSpeed: settings.typingSpeed,
-        liveHud: settings.liveHud,
-        autoScroll: settings.autoScroll,
-        language: settings.language,
-        maxResults: settings.maxResults,
-      },
-    }).catch(() => {});
-
-    const ping = await ensureContent(tab.id);
-    log.info('content ready on', ping.store, ping.url);
-
-    /* ---------- 3. Search: type it live ---------- */
-    const adapter = SA.sites.byId(ping.store).id === 'generic' ? SA.sites.detect(tab.url) : SA.sites.byId(ping.store);
-    const templates = typeof adapter.searchUrl === 'function' ? adapter.searchUrl(intent.query) : [];
-    let searchResult = null;
-
-    if (adapter.id === wantedStore || wantedStore === 'current') {
-      emitProgress(taskId, 'typing', `«${intent.query}»`, { query: intent.query });
-      try {
-        searchResult = await sendToContent(tab.id, 'SEARCH', { query: intent.query, submit: true, speed: settings.typingSpeed }, 60000);
-      } catch (e) {
-        log.warn('live typing failed:', e?.message);
-        searchResult = { ok: false, reason: String(e?.message || e) };
-      }
-      if (searchResult && !searchResult.ok) {
-        log.warn('live search reported:', searchResult.reason || 'failed', '→ results-page gate will take over');
-      }
-    }
-
-    // A full navigation kills the old content script: make sure the page
-    // we are about to verify has a live executor.
-    await ensureContent(tab.id).catch((e) => log.warn('re-ensure after search failed', e?.message));
-
-    /* ---------- 3b. HARD GATE: we must be on a results page ---------- */
-    const gate = await ensureOnResultsPage(tab, adapter, settings, {
-      liveSearch: searchResult,
-      templates,
-      onStatus: (status, detail) => emitProgress(taskId, status, detail),
-    });
-
-    if (!gate.ok) {
-      emitFail(taskId, gate.error || 'NO_SEARCH_PATH', lang);
-      return { ok: false, error: gate.error || 'NO_SEARCH_PATH', intent, products: [] };
-    }
-    tab = gate.tab || tab;
-
-    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-
-    /* ---------- 4. Scroll so lazy content loads ---------- */
-    if (settings.autoScroll !== false) {
-      emitProgress(taskId, 'scrolling', lang === 'fa' ? 'دارم صفحه رو نرم اسکرول می‌کنم تا همه کالاها لود بشن' : 'Soft-scrolling to load every product');
-      await sendToContent(tab.id, 'SCROLL', { rounds: 4, settleMs: 500 }, 60000).catch((e) => log.warn('scroll failed', e?.message));
-    }
-
-    /* ---------- 5. Best-effort site-level sorting & price filter ---------- */
-    if (intent.sort && intent.sort !== 'best_match') {
-      emitProgress(taskId, 'filtering', lang === 'fa' ? `مرتب‌سازی: ${intent.sort}` : `Sorting: ${intent.sort}`);
-      const sortRes = await sendToContent(tab.id, 'SORT', { mode: intent.sort }, 25000).catch(() => ({ ok: false }));
-      if (sortRes?.ok) await SA.utils.sleep(900);
-      log.info('site sort:', sortRes?.method || 'fallback to client-side sorting');
-    }
-
-    if (intent.minPrice || intent.maxPrice) {
-      emitProgress(taskId, 'filtering', lang === 'fa' ? 'اعمال فیلتر قیمت' : 'Applying price filter');
-      await sendToContent(tab.id, 'PRICE_FILTER', { min: intent.minPrice, max: intent.maxPrice }, 30000).catch(() => ({ ok: false }));
-      await SA.utils.sleep(900);
-    }
-
-    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-
-    /* ---------- 6. Extract ---------- */
-    emitProgress(taskId, 'analyzing', lang === 'fa' ? 'خوندن قیمت‌ها و مشخصات' : 'Reading prices and specs');
-    const extraction = await sendToContent(tab.id, 'EXTRACT', { limit: 80 }, 60000);
-    if (!extraction || !extraction.ok) {
-      emitFail(taskId, 'EXTRACT_FAILED', lang);
-      return { ok: false, error: 'EXTRACT_FAILED', intent, products: [] };
-    }
-
-    let products = extraction.products || [];
-    emitProgress(taskId, 'analyzing', lang === 'fa' ? `${products.length} کالا استخراج شد` : `${products.length} products extracted`, { count: products.length });
-
-    if (!products.length) {
-      emitProgress(taskId, 'ready', lang === 'fa' ? 'کالایی پیدا نشد' : 'No products found');
-      return { ok: true, intent, products: [], meta: extraction.meta, empty: true };
-    }
-
-    // Hard client-side budget guard (the site filter is best-effort only).
-    if (intent.maxPrice) {
-      const inBudget = products.filter((p) => p.price && p.price <= intent.maxPrice);
-      if (inBudget.length >= 2) products = inBudget;
-    }
-    if (intent.minPrice) {
-      const above = products.filter((p) => p.price && p.price >= intent.minPrice);
-      if (above.length >= 2) products = above;
-    }
-    products = products.filter((p) => p.inStock !== false);
-
-    /* ---------- 7. Rank ---------- */
-    emitProgress(taskId, 'ranking', lang === 'fa' ? 'انتخاب بهترین گزینه‌ها' : 'Picking the best options');
-    const maxPicks = intent.maxResults || settings.maxResults || 6;
-    const ranked = await SA.llm.rankProducts(products, intent, { settings, userText: text, lang, maxPicks, signal });
-
-    const durationMs = Date.now() - startedAt;
-    const payload = {
-      ok: true,
-      intent,
-      products: ranked,
-      allCount: (extraction.products || []).length,
-      meta: { ...(extraction.meta || {}), durationMs, engine: intent.source, model: intent.model || null },
-      taskId,
-      query: text,
-      at: Date.now(),
-    };
-
-    /* ---------- 8. Optional follow-up action (validated + confirmed) ---------- */
-    if (intent.action && ranked.length) {
-      const plan = await SA.llm.planAction(ranked[0], intent, settings, { signal, lang });
-      const verdict = plan.plan;
-      payload.actionPlan = { action: verdict.action, risk: verdict.risk, source: plan.source, degradedReason: plan.degradedReason || null };
-
-      if (verdict.risk === 'blocked') {
-        emitProgress(taskId, 'filtering', SA.errors.describe('ACTION_BLOCKED', { lang }));
-      } else if (verdict.risk === 'confirm') {
-        emitProgress(taskId, 'filtering', lang === 'fa' ? 'منتظر تأیید شما در سایدپنل…' : 'Waiting for your confirmation in the side panel…');
-        const { promise } = requestConfirmation({
-          action: verdict.action,
-          params: verdict.params,
-          product: ranked[0],
-          taskId,
-          tabId: tab.id,
-        });
-        const outcome = await promise;
-        if (outcome.approved && outcome.result) {
-          payload.actionResult = outcome.result;
-          emitProgress(taskId, 'ready', outcome.result.ok
-            ? lang === 'fa'
-              ? 'کالا به سبد خرید اضافه شد'
-              : 'Item added to the cart'
-            : SA.errors.describe(outcome.result.error || 'ACTION_FAILED', { lang }));
-        } else {
-          emitProgress(taskId, 'filtering', SA.errors.describe(outcome.error || 'ACTION_UNCONFIRMED', { lang }));
-        }
-      } else if (verdict.action === 'OPEN_PRODUCT' && verdict.params.url) {
-        await chrome.tabs.update(tab.id, { url: verdict.params.url, active: true }).catch(() => {});
-        payload.actionResult = { ok: true, action: 'OPEN_PRODUCT', url: verdict.params.url };
-      }
-    }
-
-    emitProgress(taskId, 'ready', lang === 'fa' ? `${ranked.length} پیشنهاد آماده شد` : `${ranked.length} picks ready`, { count: ranked.length });
-    chrome.storage.local.set({ lastRun: payload }).catch(() => {});
-    SA.store.pushHistory({ query: text, intent: { ...intent }, count: ranked.length, durationMs }).catch(() => {});
-
-    return payload;
-  } catch (err) {
-    const aborted = err?.name === 'AbortError' || /aborted|stopped/i.test(String(err?.message || err));
-    emitProgress(taskId, aborted ? 'stopped' : 'error', String(err?.message || err).slice(0, 160));
-    log.error('task failed', err);
-    return { ok: false, aborted, error: String(err?.message || err) };
-  } finally {
-    stopKeepAlive();
-    setTimeout(() => setBadge('idle'), 4000);
+function resolveConfirm(msg) {
+  const resolve = pendingConfirms.get(msg.requestId);
+  if (resolve) {
+    pendingConfirms.delete(msg.requestId);
+    resolve({ approved: Boolean(msg.approved) });
   }
 }
 
@@ -608,17 +84,19 @@ async function runTask(taskId, { text, store, tabId, settings }) {
  * Message routing
  * ================================================================== */
 
-function broadcast(message) {
-  chrome.runtime.sendMessage(message).catch(() => {});
-}
-
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return false;
 
   // Content scripts relay their own live events straight to the UI.
   if (msg.type === 'SHOPAGENT_EVENT') {
-    broadcast({ type: 'SHOPAGENT_LIVE_EVENT', ...msg, tabId: sender.tab?.id });
+    chrome.runtime.sendMessage({ type: 'SHOPAGENT_LIVE_EVENT', ...msg, tabId: sender.tab?.id }).catch(() => {});
     return false;
+  }
+
+  // HITL: content asked the user to approve an action.
+  if (msg.type === 'SHOPAGENT_CONFIRM_REQUEST') {
+    relayConfirm(msg).then(sendResponse);
+    return true; // async
   }
 
   (async () => {
@@ -646,10 +124,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
 
-        case 'TEST_CONNECTION': {
+        case 'TEST_CONNECTION':
+        case 'LIST_MODELS': {
           const settings = msg.settings || (await SA.store.getSettings());
           const result = await SA.llm.testConnection(settings);
           sendResponse({ ok: result.ok, result });
+          break;
+        }
+
+        /** Fast health probe for the side-panel status banner. */
+        case 'GET_PROVIDER_HEALTH': {
+          const settings = msg.settings || (await SA.store.getSettings());
+          const result = await SA.providers.health(settings.provider || 'ollama', settings);
+          sendResponse({ ok: true, result });
           break;
         }
 
@@ -660,26 +147,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
-        case 'OLLAMA_STATUS': {
-          // Side-panel status banner: is the local service alive?
-          const settings = msg.settings || (await SA.store.getSettings());
-          const base = settings.ollama?.baseUrl || 'http://localhost:11434';
-          const ollama = SA.providers.get('ollama');
-          const res = ollama ? await ollama.ping(base, { timeoutMs: msg.timeoutMs || 4000 }) : { ok: false, online: false, error: 'NO_PROVIDER', models: [] };
-          const configured = settings.ollama?.model;
-          const modelMissing =
-            res.online && configured && res.models.length > 0 && !res.models.some((m) => m === configured || m.startsWith(configured + ':'));
-          sendResponse({ ok: true, online: res.online === true, models: res.models || [], modelMissing, latencyMs: res.latencyMs, error: res.error || null, baseUrl: base });
-          break;
-        }
-
         case 'GET_TAB_CONTEXT': {
-          const tab = await activeTab();
-          const adapter = tab ? adapterFor(tab.url) : null;
+          const tab = await bg.tabs.activeTab();
+          const supported = bg.tabs.isSupported(tab?.url || '');
+          const storeMeta = SA.sites.list().find((s) => s.id === (tab ? SA.sites.detect(tab.url).id : null)) || null;
           sendResponse({
             ok: true,
             tab: tab ? { id: tab.id, url: tab.url, title: tab.title, favIconUrl: tab.favIconUrl, status: tab.status } : null,
-            store: adapter ? { id: adapter.id, label: adapter.label, supported: isSupported(tab?.url || '') } : null,
+            store: storeMeta ? { id: storeMeta.id, label: storeMeta.label, supported } : null,
             stores: SA.sites.list(),
           });
           break;
@@ -687,25 +162,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         case 'RUN_TASK': {
           const settings = await SA.store.getSettings();
-          const taskId = newTask();
+          const taskId = bg.core.newTask();
           sendResponse({ ok: true, taskId });
           // Fire and forget — progress arrives via SHOPAGENT_PROGRESS.
-          runTask(taskId, {
-            text: msg.text,
-            store: msg.store || settings.preferredStore,
-            tabId: msg.tabId,
-            settings,
-          }).then((result) => {
-            broadcast({ type: 'SHOPAGENT_RESULT', taskId, result });
-          });
+          bg.pipeline
+            .runTask(taskId, {
+              text: msg.text,
+              store: msg.store || settings.preferredStore,
+              tabId: msg.tabId,
+              settings,
+            })
+            .then((result) => {
+              chrome.runtime.sendMessage({ type: 'SHOPAGENT_RESULT', taskId, result }).catch(() => {});
+            });
           break;
         }
 
         case 'STOP_TASK': {
-          const task = getTask(msg.taskId) || [...tasks.values()].pop();
+          const task = bg.core.getTask(msg.taskId) || [...bg.core.tasks.values()].pop();
           if (task) {
             task.abort.abort(new Error('STOPPED'));
-            if (msg.tabId) await sendToContent(msg.tabId, 'STOP').catch(() => {});
+            if (msg.tabId) await bg.tabs.sendToContent(msg.tabId, 'STOP').catch(() => {});
           }
           sendResponse({ ok: true });
           break;
@@ -724,6 +201,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        case 'ADD_TO_CART': {
+          const result = await bg.pipeline.runAddToCart({ url: msg.url, tabId: msg.tabId });
+          if (result?.ok) bg.core.setBadge('cart');
+          sendResponse({ ok: Boolean(result?.ok), result: result || { ok: false, error: 'UNKNOWN' } });
+          break;
+        }
+
+        case 'SHOPAGENT_CONFIRM_RESPONSE':
+          resolveConfirm(msg);
+          sendResponse({ ok: true });
+          break;
+
         case 'OPEN_DOCS':
           await chrome.tabs.create({ url: msg.url || 'https://github.com/SamRonin/shopagent#ollama--راه‌اندازی-مدل-لوکال' });
           sendResponse({ ok: true });
@@ -734,69 +223,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           log.debug('settings changed elsewhere');
           sendResponse({ ok: true });
           break;
-
-        case 'PROXY_CHAT': {
-          // Exposed so the side panel can ask the model ad-hoc questions.
-          const settings = await SA.store.getSettings();
-          const res = await SA.llm.chat(settings, {
-            messages: msg.messages || [],
-            json: msg.json !== false,
-            temperature: msg.temperature,
-          });
-          sendResponse(res);
-          break;
-        }
-
-        /* ---------- Validated actions + Human-in-the-Loop ---------- */
-
-        case 'EXEC_ACTION': {
-          const settings = msg.settings || (await SA.store.getSettings());
-          const lang = settings.language || 'fa';
-          const verdict = SA.act.validate({ action: msg.action, params: msg.params });
-          if (!verdict.ok) {
-            sendResponse({ ok: false, error: verdict.error, message: SA.errors.describe(verdict.error, { lang }) });
-            break;
-          }
-          if (verdict.risk === 'blocked') {
-            sendResponse({ ok: false, error: 'ACTION_BLOCKED', message: SA.errors.describe('ACTION_BLOCKED', { lang }) });
-            break;
-          }
-          if (verdict.risk === 'confirm') {
-            const { id } = requestConfirmation({ action: verdict.action, params: verdict.params, product: msg.product || null, tabId: msg.tabId });
-            sendResponse({ ok: true, pending: true, confirmId: id });
-            break;
-          }
-          const result = await executeActionOnTab(verdict, msg.tabId, msg.product || null);
-          sendResponse({ ok: result.ok, result, message: result.ok ? null : SA.errors.describe(result.error, { lang }) });
-          break;
-        }
-
-        case 'CONFIRM_ACTION': {
-          const pending = pendingConfirms.get(msg.confirmId);
-          if (!pending) {
-            sendResponse({ ok: false, error: 'CONFIRM_EXPIRED' });
-            break;
-          }
-          pendingConfirms.delete(msg.confirmId);
-          clearTimeout(pending.timer);
-          if (!msg.approve) {
-            broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id: msg.confirmId, ok: false, error: 'ACTION_UNCONFIRMED' });
-            sendResponse({ ok: false, error: 'ACTION_UNCONFIRMED' });
-            break;
-          }
-          const verdict = SA.act.validate({ action: pending.action, params: pending.params });
-          if (!verdict.ok || verdict.risk === 'blocked') {
-            const error = verdict.ok ? 'ACTION_BLOCKED' : verdict.error;
-            broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id: msg.confirmId, ok: false, error });
-            sendResponse({ ok: false, error });
-            break;
-          }
-          const result = await executeActionOnTab(verdict, pending.tabId, pending.product);
-          broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id: msg.confirmId, ok: result.ok, result });
-          pending.resolve({ approved: true, result });
-          sendResponse({ ok: result.ok, result });
-          break;
-        }
 
         default:
           sendResponse({ ok: false, error: `UNKNOWN:${msg.type}` });
@@ -823,7 +249,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
   const settings = await SA.store.getSettings();
   if (!settings.ollama?.baseUrl) await SA.store.saveSettings({ ollama: { baseUrl: 'http://localhost:11434' } });
-  setBadge('idle');
+  bg.core.setBadge('idle');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -843,10 +269,9 @@ chrome.action.onClicked.addListener(async (tab) => {
 
 // NOTE: no `webNavigation` listener on purpose. The declarative
 // `content_scripts` entry in manifest.json covers every store navigation,
-// and `ensureContent()` re-injects programmatically whenever a PING fails
-// (e.g. a tab that was already open before the extension was installed).
+// and ensureContent() re-injects programmatically whenever a PING fails.
 // This keeps the permission set minimal: activeTab, scripting, storage,
 // sidePanel, tabs.
 
-setBadge('idle');
+bg.core.setBadge('idle');
 log.info('service worker booted');

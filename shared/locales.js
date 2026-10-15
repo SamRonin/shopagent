@@ -129,27 +129,41 @@
     'err.timeout': 'زمان اجرا به پایان رسید.',
     'err.unsupported': 'این صفحه یک فروشگاه پشتیبانی‌شده نیست. روی دیجی‌کالا یا باسلام اجرا کن.',
 
-    'banner.ollama.offline': 'سرویس Ollama روی localhost:11434 در دسترس نیست. برای استفادهٔ لوکال، در ترمینال «ollama serve» را اجرا کن.',
-    'banner.ollama.modelMissing': 'مدل انتخاب‌شده روی Ollama نصب نیست. با «ollama pull <model>» آن را نصب کن.',
-    'banner.ollama.retry': 'بررسی مجدد',
-    'banner.ollama.docs': 'راهنمای نصب',
-    'banner.ollama.checking': 'در حال بررسی سرویس Ollama…',
-
-    'action.addToCart': 'افزودن به سبد',
-    'action.done': 'اکشن با موفقیت انجام شد',
-    'action.blocked': 'پرداخت، ثبت سفارش و تغییر آدرس هرگز به‌صورت خودکار انجام نمی‌شوند؛ این کارها فقط با دست خودت در سایت.',
-    'action.pending': 'در انتظار تأیید تو در سایدپنل…',
-    'action.approve': 'تأیید می‌کنم',
-    'action.cancel': 'انصراف',
-    'action.degraded': 'پاسخ مدل نامعتبر بود؛ با تحلیل‌گر داخلی (آفلاین) ادامه داده شد.',
-
-    'stream.answering': 'در حال نوشتن پاسخ…',
-
     'a11y.close': 'بستن',
     'a11y.back': 'بازگشت',
     'a11y.toggleTheme': 'تغییر پوسته',
     'a11y.openSettings': 'باز کردن تنظیمات',
     'a11y.send': 'ارسال دستور',
+
+    'banner.ok.ollama': 'Ollama فعال است ({ms}ms)',
+    'banner.down.ollama': 'Ollama در دسترس نیست — در ترمینال بزن: ollama serve',
+    'banner.ok.groq': 'Groq متصل است ({ms}ms)',
+    'banner.down.groq': 'اتصال به Groq برقرار نشد — کلید API و اینترنت را چک کن',
+    'banner.ok.gemini': 'Gemini متصل است ({ms}ms)',
+    'banner.down.gemini': 'اتصال به Gemini برقرار نشد — کلید API و اینترنت را چک کن',
+    'banner.nokey': 'کلید API این سرویس هنوز وارد نشده است',
+    'banner.ok.builtin': 'تحلیل‌گر داخلی فعال است (بدون مدل)',
+    'banner.checking': 'در حال بررسی وضعیت سرویس…',
+    'banner.retry': 'بررسی دوباره',
+
+    'confirm.title': 'نیاز به تایید تو',
+    'confirm.approve': 'تایید و اجرا',
+    'confirm.deny': 'لغو',
+    'confirm.waiting': 'منتظر تایید تو هستم…',
+    'confirm.denied': 'انجام نشد — تایید نشد.',
+    'confirm.approved': 'تایید شد؛ در حال اجرا…',
+
+    'results.addToCart': 'افزودن به سبد',
+    'cart.added': 'به سبد خرید اضافه شد',
+    'cart.clickedUnverified': 'کلیک انجام شد؛ وضعیت سبد را خودت چک کن',
+    'cart.denied': 'افزودن به سبد لغو شد',
+    'cart.notProduct': 'این لینک یک صفحهٔ محصول معتبر نیست',
+    'cart.notFound': 'دکمهٔ افزودن به سبد پیدا نشد',
+    'cart.blocked': 'این کنش توسط گاردریل مسدود شد',
+    'cart.failed': 'افزودن به سبد ناموفق بود: {msg}',
+
+    'stream.firstToken': 'مدل شروع به پاسخ دادن کرد ({ms}ms)',
+    'stream.live': 'خروجی زنده مدل',
   };
 
   const en = {
@@ -270,27 +284,41 @@
     'err.timeout': 'The run timed out.',
     'err.unsupported': 'This page is not a supported store. Run it on Digikala or Basalam.',
 
-    'banner.ollama.offline': 'Ollama is not reachable at localhost:11434. To use the local engine, run “ollama serve” in a terminal.',
-    'banner.ollama.modelMissing': 'The selected model is not installed in Ollama. Install it with “ollama pull <model>”.',
-    'banner.ollama.retry': 'Check again',
-    'banner.ollama.docs': 'Setup guide',
-    'banner.ollama.checking': 'Checking the Ollama service…',
-
-    'action.addToCart': 'Add to cart',
-    'action.done': 'Action completed',
-    'action.blocked': 'Payment, order placement and address changes are never automated — only you can do them on the site.',
-    'action.pending': 'Waiting for your confirmation in the side panel…',
-    'action.approve': 'Approve',
-    'action.cancel': 'Cancel',
-    'action.degraded': 'The model reply was invalid; continued with the offline parser.',
-
-    'stream.answering': 'Writing the answer…',
-
     'a11y.close': 'Close',
     'a11y.back': 'Back',
     'a11y.toggleTheme': 'Toggle theme',
     'a11y.openSettings': 'Open settings',
     'a11y.send': 'Send command',
+
+    'banner.ok.ollama': 'Ollama is running ({ms}ms)',
+    'banner.down.ollama': 'Ollama is unreachable — run: ollama serve',
+    'banner.ok.groq': 'Groq connected ({ms}ms)',
+    'banner.down.groq': 'Could not reach Groq — check the API key and your connection',
+    'banner.ok.gemini': 'Gemini connected ({ms}ms)',
+    'banner.down.gemini': 'Could not reach Gemini — check the API key and your connection',
+    'banner.nokey': 'No API key configured for this service yet',
+    'banner.ok.builtin': 'Built-in parser active (no model needed)',
+    'banner.checking': 'Checking service status…',
+    'banner.retry': 'Check again',
+
+    'confirm.title': 'Your approval is needed',
+    'confirm.approve': 'Approve & run',
+    'confirm.deny': 'Cancel',
+    'confirm.waiting': 'Waiting for your approval…',
+    'confirm.denied': 'Not executed — you declined.',
+    'confirm.approved': 'Approved; running…',
+
+    'results.addToCart': 'Add to cart',
+    'cart.added': 'Added to the cart',
+    'cart.clickedUnverified': 'Click sent; please verify the cart yourself',
+    'cart.denied': 'Add-to-cart was cancelled',
+    'cart.notProduct': 'This link is not a valid product page',
+    'cart.notFound': 'The add-to-cart button was not found',
+    'cart.blocked': 'This action is blocked by the guardrails',
+    'cart.failed': 'Add-to-cart failed: {msg}',
+
+    'stream.firstToken': 'Model started answering ({ms}ms)',
+    'stream.live': 'Live model output',
   };
 
   ShopAgent.LOCALES = { fa, en };

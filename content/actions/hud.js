@@ -1,10 +1,8 @@
 /**
  * ShopAgent — content/actions/hud.js
  * ------------------------------------------------------------------
- * The "see it happen" layer: a small status card, an animated ring
- * around the element currently being acted on, a soft ghost cursor and
- * toasts. Purely presentational — disabling it (settings → HUD) removes
- * every node and makes all methods no-ops.
+ * The "see it happen" layer: a live status card, element highlighting,
+ * a ghost cursor and toasts. Pure presentation — never touches logic.
  * ------------------------------------------------------------------
  */
 (function (root) {
@@ -21,37 +19,25 @@
     navigating: 'در حال جابه‌جایی',
     thinking: 'در حال تفکر',
     ranking: 'در حال رتبه‌بندی',
+    cart: 'در حال افزودن به سبد',
     ready: 'انجام شد',
     error: 'خطا',
     stopped: 'متوقف شد',
   };
-
-  let enabled = true;
 
   const hud = {
     root: null,
     statusEl: null,
     detailEl: null,
     barEl: null,
-    ring: null,
     cursor: null,
 
-    setEnabled(on) {
-      enabled = Boolean(on);
-      if (!enabled) this.destroy();
-    },
-
-    destroy() {
-      this.root?.remove();
-      this.root = null;
-      this.ring?.remove();
-      this.ring = null;
-      this.cursor?.remove();
-      this.cursor = null;
+    settings() {
+      return ShopAgent.actions.dom.rt?.settings || { liveHud: true };
     },
 
     ensure() {
-      if (!enabled) return null;
+      if (!this.settings().liveHud) return null;
       if (this.root && document.body.contains(this.root)) return this.root;
 
       const root = document.createElement('div');
@@ -81,15 +67,16 @@
       this.barEl = root.querySelector('.sa-hud-bar');
       root.querySelector('.sa-hud-close').addEventListener('click', () => {
         root.classList.add('sa-hidden');
-        enabled = false;
-        ShopAgent.actions.onHudHidden?.();
+        const rt = ShopAgent.actions.dom.rt;
+        if (rt) rt.settings.liveHud = false;
+        rt?.emit('hud-hidden', {});
       });
       root.classList.remove('sa-hidden');
       return root;
     },
 
     setStatus(status, detail) {
-      if (!enabled) return;
+      if (!this.settings().liveHud) return;
       const root = this.ensure();
       if (!root) return;
       root.classList.remove('sa-hidden');
@@ -117,7 +104,7 @@
 
     /** Animated ring around the element currently being acted on. */
     highlight(el, kind = 'field', ms = 2600) {
-      if (!el || !enabled) return;
+      if (!el || !this.settings().liveHud) return;
       try {
         const existing = document.getElementById('shopagent-ring');
         if (existing) existing.remove();
@@ -130,7 +117,6 @@
         ring.style.width = `${rect.width + 8}px`;
         ring.style.height = `${rect.height + 8}px`;
         document.documentElement.appendChild(ring);
-        this.ring = ring;
         this.moveCursorTo(rect);
         clearTimeout(ring._t);
         ring._t = setTimeout(() => ring.remove(), ms);
@@ -139,7 +125,7 @@
 
     /** A soft "ghost cursor" that travels to the target, like a real user. */
     moveCursorTo(rect) {
-      if (!enabled) return;
+      if (!this.settings().liveHud) return;
       try {
         if (!this.cursor) {
           const c = document.createElement('div');
@@ -157,7 +143,6 @@
     },
 
     toast(text, ms = 2200) {
-      if (!enabled) return;
       try {
         const t = document.createElement('div');
         t.className = 'sa-toast';
@@ -171,8 +156,11 @@
         }, ms);
       } catch {}
     },
+
+    remove() {
+      this.root?.remove();
+    },
   };
 
-  ShopAgent.actions = ShopAgent.actions || {};
   ShopAgent.actions.hud = hud;
 })(globalThis);

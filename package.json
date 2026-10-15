@@ -1,0 +1,11 @@
+{
+  "name": "shopagent",
+  "private": true,
+  "version": "1.1.0",
+  "description": "ShopAgent — Chrome MV3 shopping assistant for Digikala & Basalam (Ollama-first)",
+  "scripts": {
+    "test": "node scripts/selftest.js && node --test \"tests/*.test.js\"",
+    "validate": "node scripts/validate.js",
+    "check": "npm run validate && npm run test"
+  }
+}

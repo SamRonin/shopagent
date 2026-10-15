@@ -1,218 +1,120 @@
 /**
  * ShopAgent — shared/errors.js
  * ------------------------------------------------------------------
- * One place that turns a raw failure (Error, string, or a stable CODE
- * from a provider) into clear, actionable Persian/English guidance.
- *
- * The background service worker is the only place that can see the
- * network for real, so every message it broadcasts for a failure goes
- * through `describe()` here. The side panel reuses the same table for
- * its inline alerts, so wording never drifts between surfaces.
- *
- * Codes are stable identifiers; `describe()` maps them to prose.
+ * One place where raw technical failures become clear, actionable
+ * Persian messages for the side panel (with an English mirror for the
+ * EN UI). Also classifies the *kind* of failure so the UI and the
+ * provider banner can react (e.g. flip Ollama to "down").
  * ------------------------------------------------------------------
  */
 (function (root) {
   'use strict';
   const ShopAgent = (root.ShopAgent = root.ShopAgent || {});
 
-  /** Pull a stable code out of whatever a layer threw. */
-  function codeOf(input) {
-    if (!input) return 'UNKNOWN';
-    if (typeof input === 'string') return input;
-    if (input.code && typeof input.code === 'string') return input.code;
-    const msg = String(input.message || input.error || input);
-    if (/^[A-Z][A-Z0-9_]*$/.test(msg)) return msg;
-    return msg;
-  }
+  const KINDS = {
+    OLLAMA_DOWN: 'ollama_down',
+    TIMEOUT: 'timeout',
+    NETWORK: 'network',
+    CORS: 'cors',
+    NO_KEY: 'no_key',
+    AUTH: 'auth',
+    RATE_LIMIT: 'rate_limit',
+    MODEL_MISSING: 'model_missing',
+    BAD_JSON: 'bad_json',
+    HTTP: 'http',
+    ABORTED: 'aborted',
+    UNKNOWN: 'unknown',
+  };
 
-  /**
-   * @param {any} input  Error | string | {error}
-   * @param {{provider?:string, lang?:'fa'|'en', model?:string}} [opts]
-   * @returns {string} human guidance in the requested language
-   */
-  function describe(input, opts = {}) {
-    const lang = opts.lang === 'en' ? 'en' : 'fa';
-    const provider = opts.provider || '';
-    const code = codeOf(input);
-
-    // Provider-specific guidance first: a failed fetch to a LOCAL service
-    // is almost always "service not running", not a generic network error.
-    if (provider === 'ollama') {
-      if (code === 'NETWORK' || code === 'UNKNOWN') return TABLE.OLLAMA_OFFLINE[lang];
-      if (code === 'HTTP_404') return TABLE.MODEL_MISSING[lang];
-    }
-
-    const row = TABLE[code] || TABLE[code.split(':')[0]];
-    if (row) return row[lang];
-
-    // HTTP fallbacks for codes we did not enumerate.
-    const http = code.match(/^HTTP_(\d{3})$/);
-    if (http) {
-      const n = Number(http[1]);
-      if (n === 401 || n === 403) return TABLE.HTTP_401[lang];
-      if (n === 404) return provider === 'ollama' ? TABLE.MODEL_MISSING[lang] : TABLE.HTTP_404[lang];
-      if (n === 429) return TABLE.HTTP_429[lang];
-      if (n >= 500) return TABLE.HTTP_5XX[lang];
-      return TABLE.UNKNOWN[lang];
-    }
-
-    return provider === 'ollama' ? TABLE.OLLAMA_OFFLINE[lang] : TABLE.UNKNOWN[lang];
-  }
-
-  const TABLE = {
-    /* ---- network / connectivity ---- */
-    NETWORK: {
-      fa: 'درخواست ناموفق بود: یا اتصال اینترنت قطع است، یا مرورگر درخواست را بلاک کرده (CORS). اینترنت را بررسی کن و دوباره تلاش کن.',
-      en: 'The request failed: either the internet is down or the browser blocked it (CORS). Check your connection and retry.',
+  const MESSAGES = {
+    ollama_down: {
+      fa: 'سرویس Ollama روی این دستگاه در دسترس نیست. در ترمینال «ollama serve» را اجرا کن (یا آدرس سرور را در تنظیمات چک کن) و دوباره امتحان کن.',
+      en: 'Ollama is not reachable on this machine. Run "ollama serve" in a terminal (or check the server URL in settings) and try again.',
     },
-    OFFLINE: {
-      fa: 'به نظر می‌رسد آفلاین هستی. ابتدا به اینترنت وصل شو.',
-      en: 'You appear to be offline. Connect to the internet first.',
+    timeout: {
+      fa: 'مدل دیر جواب داد و اتصال قطع شد. اگر مدل لوکال است، یک مدل سبک‌تر (مثل qwen2.5:3b) امتحان کن یا دوباره تلاش کن.',
+      en: 'The model took too long to respond. For a local model, try a lighter one (e.g. qwen2.5:3b) or retry.',
     },
-    TIMEOUT: {
-      fa: 'مدل دیر جواب داد و وقت تمام شد (تایم‌اوت). یک مدل سبک‌تر انتخاب کن یا دوباره تلاش کن.',
-      en: 'The model took too long (timeout). Pick a lighter model or retry.',
+    network: {
+      fa: 'اتصال اینترنت برقرار نیست یا سرور در دسترس نیست. شبکه را چک کن و دوباره تلاش کن.',
+      en: 'No internet connection or the server is unreachable. Check your network and retry.',
     },
-    ABORTED: {
-      fa: 'اجرا متوقف شد.',
-      en: 'The run was stopped.',
+    cors: {
+      fa: 'درخواست به دلیل محدودیت امنیتی مرورگر (CORS) رد شد. مطمئن شو درخواست از داخل خود اکستنشن ارسال می‌شود.',
+      en: 'The request was blocked by browser CORS policy. Make sure it is sent from the extension background.',
     },
-
-    /* ---- provider specific ---- */
-    OLLAMA_OFFLINE: {
-      fa: 'سرویس Ollama روی http://localhost:11434 در دسترس نیست. یک ترمینال باز کن و «ollama serve» را اجرا کن، سپس با «ollama pull llama3.2» مدل را نصب کن.',
-      en: 'Ollama is not reachable at http://localhost:11434. Run “ollama serve” in a terminal, then “ollama pull llama3.2”.',
+    no_key: {
+      fa: 'کلید API این سرویس وارد نشده است. از بخش تنظیمات ← هسته هوش مصنوعی کلید رایگان بگیر.',
+      en: 'No API key configured. Get a free key via Settings → AI engine.',
     },
-    MODEL_MISSING: {
-      fa: 'مدل انتخاب‌شده روی Ollama نصب نیست. در ترمینال بزن: ollama pull <model> (مثلاً ollama pull llama3.2).',
-      en: 'The selected model is not installed in Ollama. Run: ollama pull <model> (e.g. ollama pull llama3.2).',
+    auth: {
+      fa: 'کلید API نامعتبر یا منقضی است. یک کلید تازه در تنظیمات وارد کن.',
+      en: 'The API key is invalid or expired. Enter a fresh key in settings.',
     },
-    NO_KEY: {
-      fa: 'کلید API وارد نشده است. از تنظیمات، کلید رایگان پرووایدر را وارد کن.',
-      en: 'No API key configured. Add the provider’s free key in settings.',
+    rate_limit: {
+      fa: 'سقف استفاده رایگان این سرویس موقتاً پر شده. چند دقیقه صبر کن یا مدل لوکال Ollama را انتخاب کن.',
+      en: 'Rate limit reached. Wait a few minutes or switch to the local Ollama engine.',
     },
-    HTTP_401: {
-      fa: 'کلید API نامعتبر یا منقضی شده است. کلید را در تنظیمات بررسی کن.',
-      en: 'The API key is invalid or expired. Check it in settings.',
+    model_missing: {
+      fa: 'مدل انتخابی روی Ollama نصب نیست. در ترمینال بزن: ollama pull <model>',
+      en: 'The selected model is not installed. Run: ollama pull <model>',
     },
-    HTTP_429: {
-      fa: 'محدودیت نرخ درخواست (rate limit) فعال شد. چند لحظه صبر کن و دوباره تلاش کن.',
-      en: 'Rate limit reached. Wait a moment and retry.',
+    bad_json: {
+      fa: 'خروجی مدل قابل تفسیر نبود (حتی بعد از تلاش برای اصلاح). یک مدل قوی‌تر انتخاب کن یا به تحلیل‌گر داخلی سوییچ کن.',
+      en: 'The model output could not be parsed even after auto-repair. Try a stronger model or the builtin engine.',
     },
-    HTTP_404: {
-      fa: 'آدرس یا نام مدل پیدا نشد (۴۰۴). نام مدل را در تنظیمات بررسی کن.',
-      en: 'Endpoint or model not found (404). Check the model name in settings.',
+    http: {
+      fa: 'سرور مدل یک خطا برگرداند. جزئیات در کد زیر آمده است.',
+      en: 'The model server returned an error. Details in the code below.',
     },
-    HTTP_5XX: {
-      fa: 'سرویس پرووایدر موقتاً در دسترس نیست (خطای سرور). کمی بعد دوباره تلاش کن.',
-      en: 'The provider is temporarily unavailable (server error). Retry shortly.',
+    aborted: {
+      fa: 'عملیات متوقف شد.',
+      en: 'Operation stopped.',
     },
-
-    /* ---- model output / validation ---- */
-    BAD_JSON: {
-      fa: 'پاسخ مدل JSON معتبر نبود. یک بار درخواست اصلاح ارسال شد اما باز هم ناموفق بود؛ به تحلیل‌گر داخلی (آفلاین) برگشت ختم.',
-      en: 'The model reply was not valid JSON. One repair attempt failed too, so the offline parser was used.',
-    },
-    INVALID_SCHEMA: {
-      fa: 'ساختار پاسخ مدل با قرارداد اکشن‌ها مطابقت نداشت. به حالت امن (اجرای نشدن) برگشت ختم.',
-      en: 'The model reply did not match the action contract, so nothing was executed.',
-    },
-    REPAIR_FAILED: {
-      fa: 'تلاش برای اصلاح خودکار پاسخ مدل ناموفق بود.',
-      en: 'The automatic repair of the model reply failed.',
-    },
-    STREAM_UNSUPPORTED: {
-      fa: 'پرووایدر انتخاب‌شده پاسخ زنده (استریم) نمی‌دهد. برای گفتگو، Ollama یا Groq یا Gemini را از تنظیمات انتخاب کن.',
-      en: 'The selected provider does not support streamed answers. Pick Ollama, Groq or Gemini in settings for chat.',
-    },
-    STREAM_ERROR: {
-      fa: 'جریان پاسخ مدل قطع شد.',
-      en: 'The model stream was interrupted.',
-    },
-
-    /* ---- actions ---- */
-    ACTION_BLOCKED: {
-      fa: 'این اکشن به‌طور خودکار انجام نمی‌شود (پرداخت، ثبت سفارش یا تغییر آدرس). لطفاً خودت در سایت انجامش بده.',
-      en: 'This action is never automated (payment, placing an order, changing an address). Please do it yourself on the site.',
-    },
-    ACTION_INVALID: {
-      fa: 'اکشن دریافتی نامعتبر بود و اجرا نشد.',
-      en: 'The received action was invalid and was not executed.',
-    },
-    ACTION_UNCONFIRMED: {
-      fa: 'تأییدیهٔ شما دریافت نشد؛ اکشن اجرا نشد.',
-      en: 'Your confirmation was not received; the action was not executed.',
-    },
-
-    /* ---- page / tab ---- */
-    TAB_ERROR: {
-      fa: 'مشکل در باز کردن یا پیدا کردن تب مرورگر. یک تب از فروشگاه را دستی باز کن و دوباره تلاش کن.',
-      en: 'A problem occurred while opening or finding the browser tab. Open a store tab manually and retry.',
-    },
-    TAB_GONE: {
-      fa: 'تب بسته شد. دوباره تلاش کن.',
-      en: 'The tab was closed. Try again.',
-    },
-    TAB_TIMEOUT: {
-      fa: 'صفحه زیاد طول کشید تا لود شود. اتصال اینترنت را بررسی کن و دوباره تلاش کن.',
-      en: 'The page took too long to load. Check your connection and retry.',
-    },
-    INJECT_FAILED: {
-      fa: 'تزریق اسکریپت به صفحه ناموفق بود. صفحه را رفرش کن و دوباره امتحان کن.',
-      en: 'Injecting the script failed. Reload the page and try again.',
-    },
-    NO_SEARCH_INPUT: {
-      fa: 'کادر جستجو روی صفحه پیدا نشد. صفحه را رفرش کن یا آدرس جستجو را دستی باز کن.',
-      en: 'The search box was not found on the page. Reload it or open the search URL manually.',
-    },
-    SEARCH_DID_NOT_NAVIGATE: {
-      fa: 'جستجو ثبت نشد و صفحهٔ نتایج باز نشد. یک بار دستی جستجو کن تا ببینیم سلکتورها هنوز کار می‌کنند.',
-      en: 'The search did not submit and the results page did not open. Try a manual search once to check the selectors still work.',
-    },
-    NO_BUY_BUTTON: {
-      fa: 'دکمهٔ «افزودن به سبد خرید» روی صفحهٔ کالا پیدا نشد. شاید صفحه فرمت جدیدی دارد؛ دستی اضافه کن.',
-      en: 'The “add to cart” button was not found on the product page. The page may have a new layout — add it manually.',
-    },
-    ACTION_FAILED: {
-      fa: 'اجرای اکشن روی صفحه ناموفق بود.',
-      en: 'Executing the action on the page failed.',
-    },
-    CONFIRM_EXPIRED: {
-      fa: 'زمان تأیید به پایان رسید. اگر هنوز می‌خواهی، دوباره درخواست بده.',
-      en: 'The confirmation window expired. Request it again if you still want it.',
-    },
-    CONTENT_UNREACHABLE: {
-      fa: 'نتونستم به صفحهٔ فروشگاه وصل شوم. صفحه را یک بار رفرش کن و دوباره امتحان کن.',
-      en: 'Could not reach the store page. Reload the page and try again.',
-    },
-    NOT_ON_RESULTS_PAGE: {
-      fa: 'صفحهٔ نتایج جستجو تشخیص داده نشد. یک بار صفحهٔ فروشگاه را رفرش کن و دوباره امتحان کن.',
-      en: 'The search-results page could not be detected. Reload the store page once and try again.',
-    },
-    NO_SEARCH_PATH: {
-      fa: 'برای این فروشگاه مسیر جستجو مشخص نیست. آدرس صفحهٔ جستجو را دستی باز کن.',
-      en: 'No search path is known for this store. Open its search page manually.',
-    },
-    NO_TAB: {
-      fa: 'تب فعالی پیدا نشد. یک تب باز کن و دوباره امتحان کن.',
-      en: 'No active tab was found. Open a tab and try again.',
-    },
-    EMPTY_QUERY: {
-      fa: 'نتونستم بفهمم دنبال چه کالایی هستی. واضح‌تر بگو، مثلاً «ایرپاد تا ۳ میلیون».',
-      en: 'I could not identify a product. Try something like “AirPods under 3M Tomans”.',
-    },
-    EXTRACT_FAILED: {
-      fa: 'خواندن کالاها از صفحه ناموفق بود. صفحه را رفرش کن و دوباره تلاش کن.',
-      en: 'Reading products from the page failed. Reload and retry.',
-    },
-
-    /* ---- fallback ---- */
-    UNKNOWN: {
-      fa: 'خطای ناشناخته‌ای رخ داد. اگر تکرار شد، لاگ‌های دیباگ را از تنظیمات روشن کن.',
-      en: 'An unknown error occurred. If it repeats, enable debug logs in settings.',
+    unknown: {
+      fa: 'یک خطای غیرمنتظره رخ داد. جزئیات: {detail}',
+      en: 'Unexpected error. Details: {detail}',
     },
   };
 
-  ShopAgent.errors = { describe, codeOf, TABLE };
+  /**
+   * Classify any thrown error / fetch failure into a KINDS key.
+   * @param {*} err
+   * @param {{provider?:string, status?:number, body?:string}} [hints]
+   */
+  function classify(err, hints = {}) {
+    const raw = String((err && (err.message || err)) || '');
+    const lower = raw.toLowerCase();
+    const provider = hints.provider || '';
+
+    if (/aborted|aborterror|stopped/i.test(raw) || err?.name === 'AbortError') return KINDS.ABORTED;
+    if (hints.status === 401 || hints.status === 403 || lower.includes('unauthorized') || lower.includes('invalid api key') || lower.includes('api key not valid')) return KINDS.AUTH;
+    if (hints.status === 429 || lower.includes('rate limit') || lower.includes('quota') || lower.includes('too many requests')) return KINDS.RATE_LIMIT;
+    if (provider === 'ollama' && (lower.includes('failed to fetch') || lower.includes('load failed') || lower.includes('networkerror') || lower.includes('connection refused') || lower.includes('econnrefused'))) return KINDS.OLLAMA_DOWN;
+    if (lower.includes('failed to fetch') || lower.includes('load failed') || lower.includes('networkerror') || lower.includes('err_internet') || lower.includes('network')) return KINDS.NETWORK;
+    if (lower.includes('cors')) return KINDS.CORS;
+    if (lower.includes('timeout') || lower.includes('timed out')) return KINDS.TIMEOUT;
+    if (lower.includes('no_key')) return KINDS.NO_KEY;
+    if (lower.startsWith('model_missing')) return KINDS.MODEL_MISSING;
+    if (lower.includes('bad_json') || lower.includes('unexpected token') || lower.includes('json')) return KINDS.BAD_JSON;
+    if (hints.status) return KINDS.HTTP;
+    return KINDS.UNKNOWN;
+  }
+
+  /**
+   * Human message for an error.
+   * @param {*} err raw error (its message is kept as the technical code)
+   * @param {{lang?:string, provider?:string, status?:number}} [opts]
+   * @returns {{kind:string, message:string, code:string}}
+   */
+  function friendly(err, opts = {}) {
+    const lang = opts.lang === 'en' ? 'en' : 'fa';
+    const kind = classify(err, opts);
+    let tpl = MESSAGES[kind][lang];
+    const code = String((err && (err.message || err)) || 'unknown').slice(0, 220);
+    if (kind === KINDS.UNKNOWN) tpl = tpl.replace('{detail}', lang === 'fa' ? code : code);
+    return { kind, message: tpl, code };
+  }
+
+  ShopAgent.errors = { KINDS, MESSAGES, classify, friendly };
 })(globalThis);

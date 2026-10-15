@@ -1,21 +1,30 @@
 /**
  * ShopAgent — content/actions/dom.js
  * ------------------------------------------------------------------
- * DOM primitives: visibility, tiered queries, text lookup, synthetic
- * events and the resilient `waitFor` (flexible timeout + smart retry
- * via MutationObserver) used for lazily-rendered elements.
+ * The resilient element-discovery core. Every lookup goes through
+ * *fallback chains*: declared (per-site) selectors → semantic attributes
+ * (data-testid / ARIA / name) → text matching → structural heuristics.
  *
- * No page-specific knowledge lives here; store specifics come from the
- * adapters. This module never talks to the network or the model.
+ * Also owns waitFor(): a polling discovery loop with smart back-off for
+ * elements that materialise through lazy loading — replaces the old
+ * "click and pray" pattern.
  * ------------------------------------------------------------------
  */
 (function (root) {
   'use strict';
   const ShopAgent = (root.ShopAgent = root.ShopAgent || {});
-  const { normalizeText, toEnglishDigits } = ShopAgent.utils;
+  const { normalizeText, toEnglishDigits, sleep } = ShopAgent.utils;
+  const adapters = ShopAgent.adapters;
+  const log = ShopAgent.utils.logger('dom');
+
+  /** Runtime context injected by content.js (settings + abort helpers). */
+  let runtime = null;
+  function bind(rt) {
+    runtime = rt;
+  }
 
   /* ------------------------------------------------------------------ *
-   * Visibility
+   * Visibility & basic queries
    * ------------------------------------------------------------------ */
 
   function isVisible(el) {
@@ -26,21 +35,16 @@
     return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0.05;
   }
 
-  /* ------------------------------------------------------------------ *
-   * Tiered queries
-   * ------------------------------------------------------------------ */
-
   /** Try each selector in order; ignore invalid ones instead of crashing. */
   function queryFirst(selectors, scope = document, { visibleOnly = true } = {}) {
     if (!Array.isArray(selectors)) return null;
     for (const sel of selectors) {
       try {
-        const found = scope.querySelectorAll(sel);
-        for (const el of found) {
+        for (const el of scope.querySelectorAll(sel)) {
           if (!visibleOnly || isVisible(el)) return el;
         }
-      } catch {
-        // invalid selector for this engine — skip it
+      } catch (e) {
+        log.debug('bad selector skipped:', sel, e.message);
       }
     }
     return null;
@@ -77,7 +81,7 @@
     let best = null;
     let bestScore = 0;
     for (const el of nodes) {
-      const txt = normalizeText(toEnglishDigits(el.textContent || ''));
+      const txt = normalizeText(el.textContent || '');
       if (!txt || txt.length > 60) continue;
       for (const w of wanted) {
         if (txt === w || txt.includes(w)) {
@@ -95,165 +99,46 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * Resilient waiting — the lazy-load answer
+   * waitFor — discovery with timeout + adaptive polling (lazy-load safe)
    * ------------------------------------------------------------------ */
 
   /**
-   * Wait until `predicate` returns a truthy value.
-   *
-   * Polls on an interval AND reacts to DOM mutations (childList /
-   * class / hidden / disabled) so a lazily-rendered element is picked
-   * up the moment it appears instead of at the next tick. Resolves
-   * with the predicate's value; rejects with WAIT_TIMEOUT or AbortError.
-   *
-   * @param {() => any} predicate
-   * @param {{timeout?:number, interval?:number, signal?:AbortSignal}} [opts]
+   * Poll for an element without freezing the page.
+   * @param {() => *|null} finder zero-arg discovery function
+   * @param {{timeout?:number, interval?:number, backoff?:number, signal?:AbortSignal}} [opts]
+   * @returns {Promise<*|null>} first truthy result, or null on timeout
    */
-  function waitFor(predicate, { timeout = 6000, interval = 150, signal } = {}) {
-    return new Promise((resolve, reject) => {
-      const deadline = Date.now() + timeout;
-      let done = false;
-      let poll = null;
-      let observer = null;
-
-      const cleanup = () => {
-        done = true;
-        if (poll) clearInterval(poll);
-        if (observer) observer.disconnect();
-        if (signal) signal.removeEventListener('abort', onAbort);
-      };
-
-      function onAbort() {
-        cleanup();
-        reject(new DOMException('Aborted', 'AbortError'));
-      }
-
-      function check() {
-        if (done) return;
-        let value = null;
-        try {
-          value = predicate();
-        } catch {
-          value = null;
-        }
-        if (value) {
-          cleanup();
-          resolve(value);
-          return;
-        }
-        if (Date.now() >= deadline) {
-          cleanup();
-          reject(new Error('WAIT_TIMEOUT'));
-        }
-      }
-
-      if (signal) {
-        if (signal.aborted) return onAbort();
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
-
-      check();
-      if (done) return;
-
-      poll = setInterval(check, interval);
+  async function waitFor(finder, { timeout = 6000, interval = 220, backoff = 1.25, signal } = {}) {
+    const deadline = Date.now() + timeout;
+    let gap = interval;
+    for (;;) {
+      if (signal?.aborted) return null;
+      let found = null;
       try {
-        observer = new MutationObserver(check);
-        observer.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['class', 'style', 'hidden', 'disabled', 'aria-hidden'],
-        });
-      } catch {}
-    });
-  }
-
-  /** Wait for the first element matching `selectors` (or a predicate). */
-  function waitForElement(selectors, { timeout = 6000, interval = 150, visibleOnly = true, signal, scope = document } = {}) {
-    const predicate =
-      typeof selectors === 'function'
-        ? selectors
-        : () => queryFirst(Array.isArray(selectors) ? selectors : [selectors], scope, { visibleOnly });
-    return waitFor(predicate, { timeout, interval, signal });
-  }
-
-  /* ------------------------------------------------------------------ *
-   * Synthetic events — dispatch what a real browser would dispatch
-   * ------------------------------------------------------------------ */
-
-  function fire(el, type, init = {}) {
-    try {
-      el.dispatchEvent(new Event(type, { bubbles: true, cancelable: true, ...init }));
-    } catch {}
-  }
-
-  function fireKey(el, type, { key = '', code, keyCode = 0, shiftKey = false, ctrlKey = false, altKey = false, metaKey = false } = {}) {
-    try {
-      const ev = new KeyboardEvent(type, {
-        key,
-        code: code || keyToCode(key),
-        keyCode,
-        which: keyCode,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        shiftKey,
-        ctrlKey,
-        altKey,
-        metaKey,
-        view: window,
-      });
-      // KeyboardEvent.keyCode is read-only in some engines; force it.
-      Object.defineProperty(ev, 'keyCode', { get: () => keyCode });
-      Object.defineProperty(ev, 'which', { get: () => keyCode });
-      el.dispatchEvent(ev);
-    } catch {}
-  }
-
-  function keyToCode(key) {
-    if (!key) return 'Unidentified';
-    if (/^[a-zA-Z]$/.test(key)) return `Key${key.toUpperCase()}`;
-    if (/^[0-9]$/.test(key)) return `Digit${key}`;
-    const named = { ' ': 'Space', '،': 'Comma', '٫': 'Period', '.': 'Period', ',': 'Comma', '-': 'Minus', '؟': 'Slash', '/': 'Slash' };
-    return named[key] || 'Unidentified';
-  }
-
-  /** The React/Vue-safe way to write into a controlled input. */
-  function setNativeValue(el, value) {
-    const proto = el instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-    if (desc && desc.set) desc.set.call(el, value);
-    else el.value = value;
-  }
-
-  /* ------------------------------------------------------------------ *
-   * Scrolling
-   * ------------------------------------------------------------------ */
-
-  function scrollIntoViewSmooth(el) {
-    return new Promise((resolve) => {
-      try {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-      } catch {
-        try {
-          el.scrollIntoView();
-        } catch {}
+        found = finder();
+      } catch (e) {
+        log.debug('waitFor finder threw', e?.message);
       }
-      setTimeout(resolve, 420);
-    });
+      if (found) return found;
+      if (Date.now() >= deadline) return null;
+      await sleep(gap);
+      gap = Math.min(700, gap * backoff); // ease off as the wait drags on
+    }
   }
 
   /* ------------------------------------------------------------------ *
-   * Page-model discovery
+   * High-level discovery (search box, cards, cart button)
    * ------------------------------------------------------------------ */
 
-  /** The search box, found four different ways. */
+  /** The search box, found four different ways (adapter → attrs → form → shape). */
   function findSearchInput(adapter) {
-    // 1. Adapter selectors
-    let el = queryFirst(adapter?.selectors?.searchInput || []);
+    const ad = adapter || adapters.current();
+
+    // 1. Adapter chain
+    let el = queryFirst(ad.selectors?.searchInput || []);
     if (el) return { el, method: 'selector' };
 
-    // 2. Generic attributes
+    // 2. Generic semantic attributes
     el = queryFirst([
       'input[type="search"]',
       'input[role="searchbox"]',
@@ -267,7 +152,6 @@
       'input[placeholder*="جستجو"]',
       'input[placeholder*="search" i]',
       'input[placeholder*="دنبال"]',
-      'input[placeholder*="چه چیزی"]',
     ]);
     if (el) return { el, method: 'attribute' };
 
@@ -278,7 +162,7 @@
       if (inner && isVisible(inner)) return { el: inner, method: 'form' };
     }
 
-    // 4. Heuristic: the widest visible text input in the header area.
+    // 4. Heuristic: widest visible text input in the header area.
     const inputs = Array.from(document.querySelectorAll('input[type="text"],input[type="search"],input:not([type])')).filter(isVisible);
     const headerZone = document.querySelector('header') || document.body;
     const inHeader = inputs.filter((i) => headerZone.contains(i));
@@ -288,24 +172,18 @@
     return { el: null, method: 'none' };
   }
 
-  /**
-   * Product cards: declared selectors first, structural heuristics when
-   * they miss, nested duplicates removed (outermost card wins).
-   */
+  /** Product cards: declared selectors (scored) → structural heuristics → dedupe. */
   function findProductCards(adapter, limit = 300) {
-    const { cardScore, heuristicCards } = ShopAgent.sites;
-    // 1. Declared selectors
-    let cards = queryAll(adapter?.selectors?.productCard || []);
-    // Keep only elements that actually look like a card.
-    cards = cards.filter((el) => (cardScore ? cardScore(el, adapter) : 50) >= 45);
+    const ad = adapter || adapters.current();
+    let cards = queryAll(ad.selectors?.productCard || []);
+    cards = cards.filter((el) => adapters.cardScore(el, ad) >= 45);
 
-    // 2. Structural heuristics when the declared selectors missed.
-    if (cards.length < 3 && heuristicCards) {
-      const heur = heuristicCards(document, adapter, limit);
+    if (cards.length < 3) {
+      const heur = adapters.heuristicCards(document, ad, limit);
       if (heur.length > cards.length) cards = heur;
     }
 
-    // 3. De-duplicate nested duplicates (keep the outermost useful one).
+    // De-duplicate nested duplicates (keep the outermost useful one).
     const unique = [];
     for (const el of cards) {
       if (unique.some((u) => u.contains(el) || el.contains(u))) continue;
@@ -314,20 +192,63 @@
     return unique.slice(0, limit);
   }
 
+  /**
+   * The add-to-cart button on a product page — the most volatile button
+   * on any store. Five independent strategies, retried via waitFor().
+   */
+  function findCartButton(adapter, scope = document) {
+    const ad = adapter || adapters.current();
+
+    // 1. data-testid / semantic classes
+    const bySelector = queryFirst(
+      [
+        '[data-testid*="add-to-cart"]',
+        '[data-testid*="addToCart"]',
+        'button[class*="add-to-cart" i]',
+        'button[class*="addToCart" i]',
+        'button[class*="cart" i][class*="add" i]',
+        '[class*="add-to-cart" i]',
+      ],
+      scope
+    );
+    if (bySelector && isVisible(bySelector)) return bySelector;
+
+    // 2. Persian / English button texts from the adapter
+    const byText = findByText(ad.cartButtonTexts || ['افزودن به سبد خرید', 'افزودن به سبد', 'add to cart'], scope, { tags: 'button,a,span,div' });
+    if (byText) return byText;
+
+    // 3. ARIA labels
+    const byAria = queryFirst(['button[aria-label*="سبد" i]', 'button[aria-label*="cart" i]'], scope);
+    if (byAria && isVisible(byAria)) return byAria;
+
+    // 4. Form submit inside a product action bar
+    const formBtn = queryFirst(['form button[type="submit"]'], scope);
+    if (formBtn && isVisible(formBtn) && normalizeText(formBtn.textContent || '').length < 40) return formBtn;
+
+    // 5. Shopping-cart icon button in the sticky buy bar (last resort)
+    const cartIconBtn = Array.from(scope.querySelectorAll('button, a')).find((b) => {
+      if (!isVisible(b)) return false;
+      const sig = `${b.className || ''} ${b.getAttribute('data-testid') || ''} ${b.getAttribute('aria-label') || ''}`.toLowerCase();
+      return /cart|basket|سبد/.test(sig) && b.querySelector('svg,img');
+    });
+    if (cartIconBtn) return cartIconBtn;
+
+    return null;
+  }
+
   ShopAgent.actions = ShopAgent.actions || {};
   ShopAgent.actions.dom = {
+    bind,
     isVisible,
     queryFirst,
     queryAll,
     findByText,
     waitFor,
-    waitForElement,
-    fire,
-    fireKey,
-    keyToCode,
-    setNativeValue,
-    scrollIntoViewSmooth,
     findSearchInput,
     findProductCards,
+    findCartButton,
+    get rt() {
+      return runtime;
+    },
   };
 })(globalThis);

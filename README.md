@@ -38,6 +38,8 @@
 | 👀 **اجرای زنده و شفاف** | هیچ کاری پشت پرده نیست: HUD کوچک روی صفحه، حلقه دور المان فعال، و یک «مکان‌نمای شبح» دقیقاً نشان می‌دهد کجا تایپ/کلیک می‌شود. |
 | ⌨️ **تایپ انسانی** | شبیه‌سازی رویدادهای واقعی `keydown / keypress / input / keyup` با تاخیر تصادفی چند میلی‌ثانیه‌ای و setter بومی برای ورودی‌های React. |
 | 🛡️ **سلکتورهای مقاوم** | هر المان با چند سلکتور معنایی + جست‌وجوی متنی + هیوریستیک ساختاری پیدا می‌شود؛ تغییر جزئی CSS سایت، اکستنشن را نمی‌شکند. |
+| 🚦 **گاردریل و تایید انسانی** | پرداخت/آدرس/ورود/OTP **هیچ‌وقت** خودکار اجرا نمی‌شوند؛ کنش‌های سبد خرید فقط با کارت تایید صریح در پنل اجرا می‌شوند (Human-in-the-Loop). |
+| 🌊 **پاسخ استریم‌شده** | توکن‌های مدل زنده به پنل می‌آیند؛ تأخیر اولین توکن (TTFT) همین لحظه دیده می‌شود و بنر وضعیت، فعال/آفلاین بودن Ollama را خودکار نشان می‌دهد. |
 | 💸 **نرمال‌سازی پول** | `۱,۲۳۴,۵۶۷ تومان`، `1.234.567 ریال`، «۳ میلیون»، «بین ۵۰۰ هزار تا ۲ میلیون» — همه به عدد صحیح تومان تبدیل می‌شوند. |
 | 🔌 **هسته رایگان** | پیش‌فرض: **Ollama لوکال**. جایگزین‌ها: کلید رایگان **Groq** یا **Gemini**. و حالت **Built-in**: پارسر قواعدی فارسی بدون هیچ مدلی. |
 | 🌗 **UI مدرن** | Side Panel با تم تیره/روشن/خودکار، فونت وزیرمتن، RTL کامل، i18n فارسی⇄انگلیسی و انیمیشن‌های مینیمال. |
@@ -50,7 +52,7 @@
 - ✅ **باسلام** (`basalam.com`)
 - 🧪 هر فروشگاه دیگری با موتور هیوریستیک عمومی (آزمایشی)
 
-> ⚠️ سایت‌های فروشگاهی مدام DOM خود را تغییر می‌دهند. اگر روزی سلکتورها جا ماندند، فایل‌های `content/adapters/` تنها جایی هستند که باید لمس شوند — و حتی در بدترین حالت، موتور هیوریستیک و کشف داینامیک دکمه‌ها استخراج را زنده نگه می‌دارد.
+> ⚠️ سایت‌های فروشگاهی مدام DOM خود را تغییر می‌دهند. اگر روزی سلکتورها جا ماندند، [فایل آداپتر](content/adapters/digikala.js) تنها جایی است که باید لمس شود — و حتی در بدترین حالت، موتور هیوریستیک استخراج را زنده نگه می‌دارد.
 
 ---
 
@@ -191,45 +193,70 @@ ollama ps
 ```text
 shopagent/
 ├── manifest.json              # MV3: activeTab, scripting, storage, sidePanel, tabs
-├── background.js              # سرویس‌ورکر: ارکستراتور، مسیر پیام‌ها، keep-alive
+├── background.js              # ترکیب‌کنندهٔ نازک: روتر پیام‌ها + رله تایید (HITL)
 ├── background/
-│   └── providers/             # کلاینت‌های مدل با اینترفیس یکنواخت complete({…})
-│       ├── index.js           #   رجیستری + fetchWithTimeout + consumeStream
-│       ├── ollama.js          #   /api/chat (stream:false و NDJSON) + ping
-│       ├── groq.js            #   OpenAI-compatible (SSE)
-│       └── gemini.js          #   generateContent / streamGenerateContent (SSE)
-├── sidepanel.html             # پوستهٔ UI + اسپرایت SVG
+│   ├── core.js                # رجیستری تسک، progress، بج، keep-alive، رله استریم
+│   ├── tabs.js                # چرخهٔ تب + گارد سختِ صفحهٔ نتایج
+│   ├── pipeline.js            # intent → … → rank، پاسخ سؤال، افزودن به سبد
+│   └── providers/
+│       ├── index.js           # رجیستری با اینترفیس یکنواخت complete()/stream()
+│       ├── ollama.js          # NDJSON استریم + /api/tags
+│       ├── groq.js            # SSE استریم (OpenAI-compatible)
+│       ├── gemini.js          # SSE استریم (alt=sse)
+│       └── sse.js             # پارسر خط SSE/NDJSON (pure و تست‌پذیر)
+├── sidepanel.html             # پوستهٔ UI + اسپرایت SVG + بنر وضعیت سرویس
 ├── sidepanel/
 │   ├── sidepanel.css          # دیزاین‌سیستم: توکن‌ها، تم تیره/روشن، RTL/LTR منطقی
-│   └── sidepanel.js           # کنترل‌کنندهٔ UI؛ رندر با textContent (ضد XSS)
+│   └── sidepanel.js           # کنترل‌کنندهٔ UI؛ بنر، کارت تایید، استریم (ضد XSS)
 ├── content/
-│   ├── content.js             # ارکستراتور نازک: جدول پیام‌ها + ctx + اعتبارسنجی ACT
+│   ├── content.js             # ارکستراتور نازک: روتر پیام‌ها + runtime
 │   ├── content.css            # لایهٔ زندهٔ روی صفحه (ring, cursor, toast)
-│   ├── adapters/              # سلکتورهای اختصاصی هر فروشگاه + کشف دکمهٔ خرید
-│   │   ├── digikala.js        #   لیست‌های سلکتور + برچسب‌های فارسی
-│   │   ├── basalam.js         #   همان قرارداد برای باسلام
-│   │   └── index.js           #   کشف ۶ لایهٔ دکمهٔ «افزودن به سبد» + تأیید
-│   └── actions/               # اجرای اکشن‌های DOM (بدون state، ورودی ctx)
-│       ├── dom.js             #   دید/کوئی لایه‌ای/متن + waitFor با MutationObserver
-│       ├── interact.js        #   تایپ انسانی، سابمیت، اسکرول، سورت، افزودن به سبد
-│       ├── extract.js         #   استخراج کارت/قیمت/امتیاز با امتیازدهی شواهد
-│       └── hud.js             #   کارت وضعیت، رینگ، کرسر شبح، توست
+│   ├── adapters/              # دانش DOM هر فروشگاه (سلکتور + لیبل + متن سبد)
+│   │   ├── digikala.js        # زنجیرهٔ fallback از data-testid تا کلاس‌ها
+│   │   ├── basalam.js
+│   │   ├── generic.js         # آداپتر فروشگاه ناشناس
+│   │   └── index.js           # رجیستری + cardScore + heuristicCards
+│   └── actions/               # اجراکنندهٔ اکشن‌های DOM
+│       ├── dom.js             # کشف تاب‌آور: زنجیرهٔ fallback + waitFor با timeout
+│       ├── events.js          # رویدادهای واقعی + تایپ انسانی
+│       ├── scroll.js          # اسکرول نرم برای لود تنبل
+│       ├── extract.js         # استخراج محصول/قیمت با شواهد چندلایه
+│       ├── click.js           # کلیک محافظت‌شده، سابمیت سرچ، سورت/فیلتر
+│       ├── cart.js            # افزودن به سبد (فقط با تایید کاربر)
+│       ├── guard.js           # ریسک‌سنجی + رفت‌وبرگشت تایید با پنل
+│       └── hud.js             # HUD زنده، حلقه، مکان‌نما، توست
 ├── shared/
 │   ├── utils.js               # اعداد فارسی، پول ریال/تومان، بودجه، مشابهت، لاگر
-│   ├── sites.js               # آداپترهای دیجی‌کالا/باسلام + موتور هیوریستیک
-│   ├── llm.js                 # پارسر JSON مقاوم + auto-repair + رتبه‌بندی + استریم
-│   ├── act.js                 # قرارداد اکشن‌ها: safe/confirm/blocked (HITL)
-│   ├── errors.js              # پیام‌های خطای فارسی/انگلیسیِ راهنما‌محور
+│   ├── sites.js               # متادیتای URL فروشگاه‌ها (hosts, searchUrl, classify)
+│   ├── llm.js                 # پرامپت‌ها، پارسر قواعدی، auto-repair، رتبه‌بندی
+│   ├── json.js                # پارسر JSON مقاوم + تعمیر خروجی شکستهٔ مدل
+│   ├── schema.js              # ولیدیتور intent/ranking (خروجی مدل = ورودی غیرمطمئن)
+│   ├── guardrails.js          # جدول ریسک: blocked / confirm / safe
+│   ├── errors.js              # نقشهٔ خطا → پیام فارسیِ راهنما
 │   ├── storage.js             # تنظیمات و کلیدها (sync + local) و تاریخچه
 │   ├── locales.js             # دیکشنری fa/en برای سوییچ زبانی درون‌برنامه‌ای
 │   └── i18n.js                # لایهٔ ترجمهٔ زمان‌اجرا
+├── tests/                     # تست‌های Node Test Runner (بدون وابستگی)
+├── scripts/
+│   ├── selftest.js            # تست دودِ ماژول‌های اشتراکی (node scripts/selftest.js)
+│   ├── validate.js            # چک سازگاری بین‌فایلی (manifest/i18n/پیام‌ها)
+│   └── build-assets.py        # تولید آیکون‌ها و بنر (اختیاری)
 ├── _locales/{fa,en}/          # رشته‌های خود manifest (chrome.i18n)
 ├── fonts/                     # وزیرمتن (woff2) — کاملاً لوکال
 ├── icons/                     # 16/32/48/128
-├── scripts/build-assets.py    # تولید آیکون‌ها و بنر (اختیاری)
 ├── docs/                      # لوگو و social preview
 └── README.md
 ```
+
+### تست‌ها (بدون وابستگی)
+
+```bash
+npm run check        # validate + همهٔ تست‌ها
+npm test             # selftest + node --test tests/
+npm run validate     # چک‌های بین‌فایلی
+```
+
+پوشش: پارسر JSON و تعمیرش، ولیدیتورهای schema، گاردریل، نقشهٔ خطا، پارسر SSE/NDJSON، سازگاری manifest/i18n/پیام‌ها و لودِ ترتیبی باندل content.
 
 ### دسترسی‌ها و چرا
 
@@ -266,13 +293,13 @@ shopagent/
 1. ⭐ به ریپو ستاره بده و آن را Fork کن.
 2. یک شاخه بساز: `git checkout -b feat/basalam-filters`
 3. تغییراتت را با کامیت‌های کوچک و معنادار ثبت کن (Conventional Commits): `fix(content): tolerate new digikala price markup`
-4. قبل از PR: `node scripts/selftest.js` (تست‌های واحد ماژول‌ها)، `node scripts/protocol.test.js` (تست یکپارچگی با chrome استاب‌شده)، `node scripts/validate.js` (بررسی سازگاری بین فایل‌ها) و `node --check` روی فایل‌های JS تغییر یافته + باز کردن اکستنشن و اجرای یک دستور واقعی.
+4. قبل از PR: `npm run check` (ولیدیشن + تست‌ها) + باز کردن اکستنشن و اجرای یک دستور واقعی.
 5. Pull Request باز کن و بنویس **چه چیزی**، **چرا**، و **چطور تستش کردی**.
 
 **ایده‌های خوب برای شروع:**
-- آداپتر فروشگاه جدید (تخفیفستان، تیمچه، اسنپ‌مارکت…) — فقط یک فایل در `content/adapters/` که خودش را در `ShopAgent.sites.register(...)` ثبت می‌کند.
+- آداپتر فروشگاه جدید (تخفیفستان، تیمچه، اسنپ‌مارکت…) — یک فایل در `content/adapters/` + یک مدخل متادیتا در `shared/sites.js`.
 - بهبود پارسر قواعدی فارسی (صفت‌ها، رنگ، سایز).
-- تست‌های واحد برای `utils.extractMoney` و `llm.builtinParseIntent`.
+- حالت مقایسهٔ عمیق‌تر (خواندن مشخصات فنی صفحهٔ کالا با `READ_PRODUCT`).
 
 جزئیات بیشتر و کدِ رفتار: [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -305,6 +332,9 @@ shopagent/
 - 🧠 **Natural-language Persian intent parsing** — product, budget range, brand, sort order and attributes.
 - 👀 **Fully transparent automation** — an on-page HUD, a focus ring on the active element and a ghost cursor show exactly what is being typed or clicked.
 - ⌨️ **Human-like typing** — real `keydown / keypress / input / keyup` events with randomised jitter and the native value setter for React-controlled inputs.
+- 🚦 **Guardrails & human-in-the-loop** — checkout, address and login targets are *never* automated; cart actions run only after an explicit approval card in the panel.
+- 🌊 **Streaming responses & provider banner** — model tokens arrive live (visible TTFT), and a status banner shows whether Ollama is up in one glance.
+- 🧰 **Self-healing model output** — a robust JSON repair parser + schema validators + one-shot auto-repair round; anything unrecoverable degrades to the offline parser and is reported transparently.
 - 🛡️ **Resilient selectors** — every element is located through layered semantic selectors → text-label search → structural heuristics, so minor CSS changes on the store don't break the run.
 - 💸 **Money normalisation** — `۱,۲۳۴,۵۶۷ تومان`, `1.234.567 ریال`, «3 million», «between 500k and 2M» all resolve to an integer Toman value.
 - 🔌 **Free-by-design AI core** — local **Ollama** by default; optional free-tier **Groq** / **Gemini** keys; plus a fully offline **built-in rule-based Persian parser**.
@@ -417,7 +447,7 @@ Other settings: theme (light/dark/auto), UI language (fa⇄en, live), human typi
 
 **The resilience rule:** every DOM element is located in four layers — ① adapter selectors, ② generic attributes (`type=search`, `aria-label`, `placeholder`), ③ Persian label text search, ④ structural scoring (`cardScore`). If all four miss, `heuristicCards` reconstructs repeated same-shape groups from the raw DOM.
 
-**Key files:** `background.js` (orchestrator, keep-alive) · `background/providers/*` (model clients) · `content/content.js` + `content/actions/*` (Action Executor) · `content/adapters/*` (store selectors) · `shared/llm.js` (robust JSON + auto-repair + ranking + streaming) · `shared/act.js` (action contract) · `shared/errors.js` (Persian error guidance) · `shared/utils.js` (Persian digits & money) · `sidepanel/*` (UI).
+**Key files:** `background.js` (thin router + HITL relay) · `background/pipeline.js` (the run pipeline) · `background/providers/` (Ollama/Groq/Gemini with a uniform `complete()`/`stream()` interface) · `content/adapters/` (per-store DOM knowledge) · `content/actions/` (typed/clicked/scrolled/extracted DOM actions) · `shared/llm.js` (prompts, rule-based fallback, auto-repair, ranking) · `shared/guardrails.js` (risk table) · `sidepanel/*` (UI).
 
 **Permissions and why:** `activeTab` (act on the tab you invoked), `scripting` (re-inject into tabs opened before install), `storage` (settings & keys), `sidePanel` (the UI), `tabs` (find/open/focus store tabs and read the URL to detect the store). `host_permissions` cover only the two stores and the three model endpoints — nothing else.
 
@@ -444,10 +474,10 @@ Contributions are very welcome:
 1. ⭐ Star & fork the repo.
 2. Branch: `git checkout -b feat/basalam-filters`
 3. Small, meaningful commits (Conventional Commits): `fix(content): tolerate new digikala price markup`
-4. Before a PR: run `node scripts/selftest.js` (module unit tests), `node scripts/protocol.test.js` (integration test with a stubbed `chrome`), `node scripts/validate.js` (cross-file consistency) and `node --check` the JS files you touched + load the extension and run one real command.
+4. Before a PR: `npm run check` (validation + tests) + load the extension and run one real command.
 5. Open a PR describing **what**, **why**, and **how you tested it**.
 
-Good first issues: a new store adapter (one self-registering file in `content/adapters/`), richer Persian rule-based parsing, more `confirm`-level actions in `shared/act.js`, or unit tests for `utils.extractMoney`, `llm.parseJsonLoose` and the provider parsers.
+Good first issues: a new store adapter (one file in `content/adapters/` + one metadata entry in `shared/sites.js`), richer Persian rule-based parsing, or deeper compare mode via `READ_PRODUCT`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 

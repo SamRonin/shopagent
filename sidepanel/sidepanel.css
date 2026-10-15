@@ -423,6 +423,68 @@ p {
   cursor: progress;
 }
 
+/* ---------- Provider status banner ---------- */
+
+.provider-banner {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 var(--sp-4) var(--sp-2);
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  font-size: 10.8px;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+  flex: 0 0 auto;
+  transition: background var(--dur), border-color var(--dur), color var(--dur);
+}
+.provider-banner .pb-ico {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+.provider-banner .pb-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.provider-banner .pb-retry {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--r-full);
+  color: var(--accent);
+  background: var(--accent-soft);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur);
+}
+.provider-banner[data-state='down'] .pb-retry,
+.provider-banner[data-state='nokey'] .pb-retry {
+  opacity: 1;
+  pointer-events: auto;
+}
+.provider-banner[data-state='ok'] {
+  background: color-mix(in srgb, var(--success) 8%, var(--surface));
+  border-color: color-mix(in srgb, var(--success) 25%, transparent);
+  color: color-mix(in srgb, var(--success) 72%, var(--text));
+}
+.provider-banner[data-state='down'] {
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+  color: color-mix(in srgb, var(--danger) 78%, var(--text));
+}
+.provider-banner[data-state='nokey'] {
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  color: color-mix(in srgb, var(--warning) 78%, var(--text));
+}
+.provider-banner[data-state='checking'] .pb-ico {
+  animation: pulse 1.1s infinite;
+}
+
 /* ---------- Store bar ---------- */
 
 .storebar {
@@ -1120,6 +1182,117 @@ p {
   border-radius: 4px;
   direction: ltr;
   display: inline-block;
+}
+
+/* ---------- Streaming bubble ---------- */
+
+.bubble-streaming {
+  min-block-size: 2.4em;
+  color: var(--text-2);
+  white-space: pre-wrap;
+}
+.bubble-streaming::after {
+  content: '▍';
+  color: var(--accent);
+  animation: caret 0.9s steps(2) infinite;
+}
+@keyframes caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ---------- HITL confirmation card ---------- */
+
+.confirm-card {
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, transparent);
+  border-radius: var(--r-md);
+  padding: 11px 13px;
+  box-shadow: var(--shadow-sm);
+  animation: fade-up 0.3s var(--ease) both;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.confirm-card[data-state='approved'] {
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+}
+.confirm-card[data-state='denied'] {
+  opacity: 0.72;
+  border-color: var(--border);
+}
+.confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--warning) 82%, var(--text));
+}
+.confirm-head svg {
+  width: 15px;
+  height: 15px;
+}
+.confirm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.confirm-action {
+  font-weight: 700;
+}
+.confirm-detail {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.75;
+}
+.confirm-url {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+  direction: ltr;
+  text-align: start;
+  word-break: break-all;
+}
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+.confirm-actions button {
+  flex: 1 1 auto;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  font-size: 11.8px;
+  font-weight: 700;
+  transition: filter var(--dur), transform 0.12s var(--ease);
+}
+.confirm-actions button:hover:not([disabled]) {
+  filter: brightness(0.96);
+}
+.confirm-actions button:active:not([disabled]) {
+  transform: scale(0.97);
+}
+.btn-confirm-ok {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-confirm-no {
+  background: var(--surface-2);
+  color: var(--text-2);
+  border: 1px solid var(--border-strong);
+}
+.confirm-actions button[disabled] {
+  opacity: 0.55;
+  cursor: default;
+}
+.confirm-note {
+  font-size: 10.8px;
+  color: var(--text-3);
 }
 
 /* ================================================================== *
@@ -1941,104 +2114,3 @@ p {
   border-radius: var(--r-xs);
 }
 
-/* ================================================================== *
- * Service status banner (Ollama reachability) + confirmation modal
- * ================================================================== */
-
-.banner {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-  padding: 9px 12px;
-  margin-block-start: 10px;
-  border-radius: var(--r-md);
-  background: color-mix(in srgb, var(--warning) 10%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
-  font-size: 11.5px;
-  line-height: 1.7;
-  animation: fade-up 0.25s var(--ease) both;
-}
-.banner[hidden] {
-  display: none;
-}
-.banner-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--r-full);
-  background: var(--warning);
-  flex: 0 0 auto;
-}
-.banner.ok {
-  background: color-mix(in srgb, var(--success) 10%, var(--surface));
-  border-color: color-mix(in srgb, var(--success) 30%, transparent);
-}
-.banner.ok .banner-dot {
-  background: var(--success);
-}
-.banner-dot[data-state='error'] {
-  background: var(--danger);
-}
-.banner-body {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.banner-body strong {
-  font-size: 12px;
-}
-.banner-actions {
-  display: flex;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.bubble.streaming::after {
-  content: '▍';
-  margin-inline-start: 2px;
-  animation: sa-blink 1s steps(2, start) infinite;
-}
-@keyframes sa-blink {
-  to {
-    visibility: hidden;
-  }
-}
-
-.modal-layer {
-  position: fixed;
-  inset: 0;
-  background: rgba(2, 6, 23, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  z-index: 60;
-}
-.modal-layer[hidden] {
-  display: none;
-}
-.modal {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  padding: 18px;
-  max-width: 320px;
-  width: 100%;
-  box-shadow: 0 24px 48px rgba(2, 6, 23, 0.28);
-  animation: fade-up 0.25s var(--ease) both;
-}
-.modal h3 {
-  margin: 0 0 8px;
-  font-size: 14px;
-}
-.modal p {
-  margin: 0 0 14px;
-  font-size: 12px;
-  line-height: 1.9;
-  color: var(--text-2);
-}
-.modal-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
