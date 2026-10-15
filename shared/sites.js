@@ -209,6 +209,40 @@
     }
   }
 
+  /**
+   * Classify a URL without touching the DOM.
+   *
+   * This is the guard that stops the agent from "searching" on a store
+   * homepage: a run may only scroll/extract once `results` is true.
+   *
+   * @param {string} url
+   * @returns {{home:boolean, results:boolean, path:string, query:string}}
+   */
+  function classifyUrl(url) {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      return { home: false, results: false, path: '', query: '' };
+    }
+    const path = (u.pathname || '/').replace(/\/+$/, '') || '/';
+    const query = u.search || '';
+
+    const resultsPath = /(^|\/)(search|srch|results?|s|find)(\/|$)/i.test(path);
+    const resultsQuery = /[?&](q|query|keyword|keywords|search|searchtext|text|term)=/i.test(query);
+    // A product page is never a results page, even if it carries ?q=.
+    const productPath = /(^|\/)(product|item|p|dp|goods)(\/|-|$)/i.test(path);
+
+    const home = path === '/' || /^\/(fa|en|home|index\.html?)$/i.test(path);
+
+    return {
+      home,
+      results: resultsPath || (resultsQuery && !productPath),
+      path,
+      query,
+    };
+  }
+
   function list() {
     return [...ADAPTERS, generic].map((a) => ({
       id: a.id,
@@ -311,6 +345,7 @@
     digikala,
     basalam,
     detect,
+    classifyUrl,
     list,
     cardScore,
     heuristicCards,

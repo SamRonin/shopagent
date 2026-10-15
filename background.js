@@ -214,6 +214,65 @@ function sendToContent(tabId, action, payload = {}, timeoutMs = 90000) {
   });
 }
 
+/** Ask the page where we are; degrade to URL-only classification. */
+async function pageKindOf(tab) {
+  try {
+    const k = await sendToContent(tab.id, 'PAGE_KIND', {}, 15000);
+    if (k && k.ok) return k;
+  } catch (e) {
+    log.debug('PAGE_KIND unreachable', e?.message);
+  }
+  const cls = SA.sites.classifyUrl(tab.url || '');
+  return { ok: true, url: tab.url, home: cls.home, resultsUrl: cls.results, resultsDom: false, results: cls.results, unreachable: true };
+}
+
+/**
+ * HARD GUARANTEE: no scrolling / extraction may happen unless the tab is
+ * showing a genuine search-results listing.
+ *
+ *   1. the live SEARCH already landed on a results URL  → done
+ *   2. the tab is already on a results URL (refining)   → done
+ *   3. otherwise navigate to the adapter's search URL   → verify again
+ *
+ * This is what prevents the old failure mode where a submit no-op left
+ * the run scrolling the Digikala homepage.
+ */
+async function ensureOnResultsPage(tab, adapter, settings, { liveSearch, templates, onStatus } = {}) {
+  const lang = settings.language || 'fa';
+
+  if (liveSearch && liveSearch.ok && liveSearch.resultsPage) return { ok: true, tab };
+
+  let kind = await pageKindOf(tab);
+  if (kind.results) return { ok: true, tab };
+
+  const target = templates && templates.length ? templates[0] : null;
+  if (!target) {
+    // Unknown store: the live submit was our only chance.
+    return kind.results ? { ok: true, tab } : { ok: false, error: 'NO_SEARCH_PATH', tab };
+  }
+
+  onStatus?.('navigating', lang === 'fa' ? 'رفتن مستقیم به صفحهٔ نتایج جستجو' : 'Going straight to the search results');
+  await chrome.tabs.update(tab.id, { url: target });
+  tab = await waitForTab(tab.id, { timeout: 30000 });
+  await ensureContent(tab.id);
+  await SA.utils.sleep(900);
+
+  kind = await pageKindOf(tab);
+  if (kind.results) return { ok: true, tab };
+
+  // One retry with the adapter's second URL template.
+  if (templates[1]) {
+    await chrome.tabs.update(tab.id, { url: templates[1] });
+    tab = await waitForTab(tab.id, { timeout: 30000 });
+    await ensureContent(tab.id);
+    await SA.utils.sleep(900);
+    kind = await pageKindOf(tab);
+    if (kind.results) return { ok: true, tab };
+  }
+
+  return { ok: false, error: 'NOT_ON_RESULTS_PAGE', tab };
+}
+
 /* ================================================================== *
  * The pipeline
  * ================================================================== */
@@ -267,36 +326,39 @@ async function runTask(taskId, { text, store, tabId, settings }) {
     log.info('content ready on', ping.store, ping.url);
 
     /* ---------- 3. Search: type it live ---------- */
-    let searchResult = null;
     const adapter = SA.sites[ping.store] || SA.sites.detect(tab.url);
+    const templates = typeof adapter.searchUrl === 'function' ? adapter.searchUrl(intent.query) : [];
+    let searchResult = null;
 
     if (adapter.id === wantedStore || wantedStore === 'current') {
       emitProgress(taskId, 'typing', `«${intent.query}»`, { query: intent.query });
       try {
         searchResult = await sendToContent(tab.id, 'SEARCH', { query: intent.query, submit: true, speed: settings.typingSpeed }, 60000);
       } catch (e) {
-        log.warn('live typing failed, will fall back to URL navigation:', e?.message);
+        log.warn('live typing failed:', e?.message);
         searchResult = { ok: false, reason: String(e?.message || e) };
+      }
+      if (searchResult && !searchResult.ok) {
+        log.warn('live search reported:', searchResult.reason || 'failed', '→ results-page gate will take over');
       }
     }
 
-    // Fallback: navigate straight to the search URL (still visible to the user).
-    if (!searchResult || !searchResult.ok) {
-      const templates = typeof adapter.searchUrl === 'function' ? adapter.searchUrl(intent.query) : [];
-      const target = templates[0];
-      if (!target) {
-        emitProgress(taskId, 'error', lang === 'fa' ? 'کادر جستجو پیدا نشد و آدرس جایگزینی هم نداریم.' : 'Search box not found and no fallback URL.');
-        return { ok: false, error: 'NO_SEARCH_PATH', intent, products: [] };
-      }
-      emitProgress(taskId, 'navigating', lang === 'fa' ? 'رفتن مستقیم به صفحه نتایج' : 'Going straight to results');
-      await chrome.tabs.update(tab.id, { url: target });
-      tab = await waitForTab(tab.id, { timeout: 30000 });
-      await ensureContent(tab.id);
-      await SA.utils.sleep(900);
-    } else {
-      // The SPA may still be painting the grid.
-      await SA.utils.sleep(700);
+    // A full navigation kills the old content script: make sure the page
+    // we are about to verify has a live executor.
+    await ensureContent(tab.id).catch((e) => log.warn('re-ensure after search failed', e?.message));
+
+    /* ---------- 3b. HARD GATE: we must be on a results page ---------- */
+    const gate = await ensureOnResultsPage(tab, adapter, settings, {
+      liveSearch: searchResult,
+      templates,
+      onStatus: (status, detail) => emitProgress(taskId, status, detail),
+    });
+
+    if (!gate.ok) {
+      emitProgress(taskId, 'error', lang === 'fa' ? 'نتوانستم به صفحهٔ نتایج جستجو بروم.' : 'Could not reach a search-results page.');
+      return { ok: false, error: gate.error || 'NO_SEARCH_PATH', intent, products: [] };
     }
+    tab = gate.tab || tab;
 
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 

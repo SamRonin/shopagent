@@ -25,6 +25,7 @@ immediately with a `taskId` and streams progress separately.
 | bg → panel | `SHOPAGENT_RESULT` | `{ taskId, result }` | the full run result (intent + ranked products) |
 | content → bg → panel | `SHOPAGENT_EVENT` → `SHOPAGENT_LIVE_EVENT` | `{ event, data }` | live telemetry: `typing`, `scrolling`, `extracted`, `navigation`, `ready`, `hud-hidden` |
 | bg → content | `SHOPAGENT_PING` | – | `{ ok, store, url, cards, hasSearchInput }` |
+| bg → content | `SHOPAGENT_PAGE_KIND` | – | `{ ok, url, home, resultsUrl, resultsDom, results, cards }` — the results-page gate |
 | bg → content | `SHOPAGENT_SYNC_SETTINGS` | `{ settings }` | push typing speed / HUD / language into the page |
 | bg → content | `SHOPAGENT_SEARCH` | `{ query, submit?, speed? }` | human typing + submit; falls back to URL navigation in bg |
 | bg → content | `SHOPAGENT_SCROLL` | `{ rounds?, settleMs? }` | soft scroll for lazy loading |

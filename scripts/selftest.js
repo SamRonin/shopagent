@@ -226,6 +226,19 @@ eq('digikala bare', ShopAgent.sites.detect('https://digikala.com/product/dkp-1/'
 eq('basalam', ShopAgent.sites.detect('https://basalam.com/search?q=x').id, 'basalam');
 eq('other → generic', ShopAgent.sites.detect('https://example.com/shop').id, 'generic');
 
+section('page classification (the results-page gate)');
+{
+  const c = ShopAgent.sites.classifyUrl;
+  eq('digikala home = home, not results', c('https://www.digikala.com/'), { home: true, results: false, path: '/', query: '' });
+  eq('digikala search path → results', c('https://www.digikala.com/search/?q=airpods').results, true);
+  eq('basalam search query → results', c('https://basalam.com/search?q=%DA%A9%D9%81%D8%B4').results, true);
+  eq('product page ≠ results', c('https://www.digikala.com/product/dkp-123456/x/').results, false);
+  eq('product page with ?q= ≠ results', c('https://www.digikala.com/product/dkp-9/?q=a').results, false);
+  eq('category page ≠ results-by-url', c('https://www.digikala.com/category/mobile/').results, false);
+  eq('home with ?q= still results=false path-wise', c('https://basalam.com/').home, true);
+  eq('garbage url is safe', c('not a url'), { home: false, results: false, path: '', query: '' });
+}
+
 /* ------------------------------------------------------------------ *
  * 10. i18n
  * ------------------------------------------------------------------ */

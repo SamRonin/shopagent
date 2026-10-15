@@ -540,6 +540,21 @@
         );
       }
     }
+
+    // Relevance sanity check — never silently show unrelated products.
+    const q = (intent && intent.query) || '';
+    if (q && products.length) {
+      const avg = products.reduce((a, p) => a + utils.similarity(p.title || '', q), 0) / products.length;
+      log.debug('avg title/query similarity:', avg.toFixed(2));
+      if (avg < 0.1) {
+        addAlert(
+          i18n.getLang() === 'fa'
+            ? 'هشدار: عنوان این کالاها شباهت بسیار کمی به درخواست تو دارد. عبارت جستجو را دقیق‌تر بنویس (مثلاً نام کالا) یا فروشگاه را عوض کن.'
+            : 'Warning: these titles barely match your query. Make the search phrase more specific (e.g. the product name) or switch store.',
+          'warn'
+        );
+      }
+    }
     scrollToEnd();
   }
 
@@ -1145,6 +1160,10 @@
           if (!result.aborted) {
             const map = {
               NO_SEARCH_PATH: t('err.unsupported'),
+              NOT_ON_RESULTS_PAGE:
+                i18n.getLang() === 'fa'
+                  ? 'صفحهٔ نتایج جستجو تشخیص داده نشد. یک بار صفحهٔ فروشگاه را رفرش کن و دوباره امتحان کن.'
+                  : 'The search-results page could not be detected. Reload the store page once and try again.',
               CONTENT_UNREACHABLE: t('err.inject'),
               NO_TAB: t('err.noTab'),
               EMPTY_QUERY: i18n.getLang() === 'fa' ? 'نتونستم بفهمم دنبال چه کالایی هستی. واضح‌تر بگو مثلاً «ایرپاد تا ۳ میلیون».' : 'I could not identify a product. Try something like "AirPods under 3M Tomans".',

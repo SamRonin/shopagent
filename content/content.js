@@ -334,46 +334,134 @@
     fireKey(el, 'keyup', { key: 'Enter', keyCode: 13 });
   }
 
-  /** Submit a search: try the button, then the form, then Enter. */
+  /* ================================================================== *
+   * Page kind — the guard that stops us "searching" on a homepage
+   * ================================================================== */
+
+  /** DOM signals that only make sense on a listing/results view. */
+  function resultsDomSignals() {
+    const probes = [
+      '[class*="search-result" i]',
+      '[data-testid*="search-result" i]',
+      '[class*="results-list" i]',
+      '[class*="product-list" i]',
+      '[class*="Sort" i], select[class*="sort" i]',
+    ];
+    for (const p of probes) {
+      try {
+        const el = document.querySelector(p);
+        if (el && isVisible(el)) return true;
+      } catch {}
+    }
+    return Boolean(findByText(['نتایج جستجو', 'نتایج', 'results for'], document, { tags: 'h1,h2,h3,span,div' }));
+  }
+
+  /**
+   * Where are we right now?
+   * `results` is only true for a genuine listing: the URL says search, or
+   * (when not on the homepage) listing-only DOM signals are present.
+   * Homepage carousels must NEVER count as results — that false positive
+   * is exactly what made earlier builds scroll the home page instead of
+   * searching.
+   */
+  function pageKind() {
+    const cls = sites.classifyUrl ? sites.classifyUrl(location.href) : { home: false, results: false };
+    const dom = resultsDomSignals();
+    return {
+      url: location.href,
+      home: cls.home,
+      resultsUrl: cls.results,
+      resultsDom: dom,
+      results: cls.results || (!cls.home && dom),
+    };
+  }
+
+  /** Poll until the URL actually becomes a different, results-ish page. */
+  async function waitForResultsPage(urlBefore, timeout = 9000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      throwIfAborted();
+      await sleep(220);
+
+      if (location.href !== urlBefore) {
+        await sleep(600); // let the SPA settle
+        const kind = pageKind();
+        return { ok: true, url: location.href, urlChanged: true, resultsPage: kind.results, cards: findProductCards(60).length };
+      }
+
+      // Same URL: an SPA may have swapped the view in place (history.replaceState).
+      const kind = pageKind();
+      if (kind.results && kind.resultsUrl) {
+        await sleep(400);
+        return { ok: true, url: location.href, urlChanged: false, resultsPage: true, cards: findProductCards(60).length };
+      }
+    }
+    return { ok: false, url: location.href, urlChanged: false, resultsPage: pageKind().results };
+  }
+
+  /**
+   * Submit the typed query, then PROVE we left for a results page.
+   * Strategies are tried in order (Enter → real form → visible button)
+   * and each one is verified; a no-op click can no longer be mistaken
+   * for success.
+   */
   async function submitSearch(inputEl) {
     hud.setStatus('typing', 'ارسال جستجو');
     const urlBefore = location.href;
+    const form = inputEl.closest('form');
+    const btn =
+      queryFirst(adapter.selectors?.searchSubmit || []) ||
+      form?.querySelector('button[type="submit"],input[type="submit"]') ||
+      findByText(['جستجو', 'سرچ', 'search'], form || document);
 
-    const btn = queryFirst(adapter.selectors?.searchSubmit || []) ||
-      (inputEl.closest('form')?.querySelector('button[type="submit"],input[type="submit"]')) ||
-      findByText(['جستجو', 'سرچ', 'search'], inputEl.closest('form') || document);
-
-    if (btn) {
-      highlight(btn, 'click');
-      await sleep(randInt(120, 320));
-      btn.click();
-      log.info('clicked search button');
-    } else {
-      const form = inputEl.closest('form');
-      if (form) {
+    const attempts = [
+      async () => {
+        await pressEnter(inputEl);
+        log.info('submit attempt: Enter');
+      },
+    ];
+    if (form) {
+      attempts.push(async () => {
         highlight(form, 'click');
         if (typeof form.requestSubmit === 'function') form.requestSubmit();
         else form.submit();
-        log.info('submitted search form');
-      } else {
-        await pressEnter(inputEl);
-        log.info('pressed Enter');
-      }
+        log.info('submit attempt: form submit');
+      });
+    }
+    if (btn) {
+      attempts.push(async () => {
+        highlight(btn, 'click');
+        await sleep(randInt(120, 300));
+        btn.click();
+        log.info('submit attempt: button click');
+      });
     }
 
-    // Wait for either a URL change or fresh product cards.
-    const deadline = Date.now() + 12000;
-    while (Date.now() < deadline) {
+    for (const attempt of attempts) {
       throwIfAborted();
-      await sleep(250);
-      const urlChanged = location.href !== urlBefore;
-      const cards = findProductCards(8);
-      if (urlChanged || cards.length >= 2) {
-        await sleep(600); // let the SPA settle
-        return { ok: true, url: location.href, cards: cards.length, urlChanged };
+      try {
+        await attempt();
+      } catch (e) {
+        log.warn('submit attempt threw', e?.message);
       }
+      const reached = await waitForResultsPage(urlBefore, 9000);
+      if (reached.ok) return reached;
+      // Autocomplete overlays love stealing focus; take it back.
+      try {
+        inputEl.focus({ preventScroll: true });
+      } catch {}
+      await sleep(randInt(120, 260));
     }
-    return { ok: false, url: location.href, reason: 'NO_RESULTS_DETECTED' };
+
+    const kind = pageKind();
+    return {
+      ok: false,
+      url: location.href,
+      urlChanged: false,
+      resultsPage: kind.results,
+      home: kind.home,
+      reason: 'SEARCH_DID_NOT_NAVIGATE',
+    };
   }
 
   /* ================================================================== *
@@ -915,19 +1003,19 @@
 
     SEARCH: async ({ query, submit = true, speed }) => {
       hud.setStatus('typing');
+      const kindBefore = pageKind();
       const found = findSearchInput();
       if (!found.el) {
         hud.fail('کادر جستجو پیدا نشد');
-        return { ok: false, reason: 'NO_SEARCH_INPUT', url: location.href };
+        return { ok: false, reason: 'NO_SEARCH_INPUT', url: location.href, resultsPage: kindBefore.results, home: kindBefore.home };
       }
       await typeHuman(found.el, query, { speed });
-      if (submit) {
-        const res = await submitSearch(found.el);
-        if (!res.ok) hud.fail('نتیجه‌ای لود نشد');
-        else hud.setStatus('ready', `${res.cards} کالا`);
-        return { ...res, method: found.method };
-      }
-      return { ok: true, method: found.method, submitted: false };
+      if (!submit) return { ok: true, method: found.method, submitted: false };
+
+      const res = await submitSearch(found.el);
+      if (!res.ok) hud.fail('به صفحهٔ نتایج نرفتیم');
+      else hud.setStatus('ready', res.cards ? `${res.cards} کالا` : '');
+      return { ...res, method: found.method, wasHome: kindBefore.home };
     },
 
     SUBMIT_SEARCH: async () => {
@@ -956,6 +1044,9 @@
       await sleep(700);
       return { ok: true, label: normalizeText(el.textContent) };
     },
+
+    /** Where are we? The background uses this as the results-page gate. */
+    PAGE_KIND: async () => ({ ok: true, ...pageKind(), cards: findProductCards(300).length }),
 
     READ_PAGE: async () => {
       const main = document.querySelector('main, #main, [role="main"]') || document.body;
