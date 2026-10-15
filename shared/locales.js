@@ -129,6 +129,22 @@
     'err.timeout': 'زمان اجرا به پایان رسید.',
     'err.unsupported': 'این صفحه یک فروشگاه پشتیبانی‌شده نیست. روی دیجی‌کالا یا باسلام اجرا کن.',
 
+    'banner.ollama.offline': 'سرویس Ollama روی localhost:11434 در دسترس نیست. برای استفادهٔ لوکال، در ترمینال «ollama serve» را اجرا کن.',
+    'banner.ollama.modelMissing': 'مدل انتخاب‌شده روی Ollama نصب نیست. با «ollama pull <model>» آن را نصب کن.',
+    'banner.ollama.retry': 'بررسی مجدد',
+    'banner.ollama.docs': 'راهنمای نصب',
+    'banner.ollama.checking': 'در حال بررسی سرویس Ollama…',
+
+    'action.addToCart': 'افزودن به سبد',
+    'action.done': 'اکشن با موفقیت انجام شد',
+    'action.blocked': 'پرداخت، ثبت سفارش و تغییر آدرس هرگز به‌صورت خودکار انجام نمی‌شوند؛ این کارها فقط با دست خودت در سایت.',
+    'action.pending': 'در انتظار تأیید تو در سایدپنل…',
+    'action.approve': 'تأیید می‌کنم',
+    'action.cancel': 'انصراف',
+    'action.degraded': 'پاسخ مدل نامعتبر بود؛ با تحلیل‌گر داخلی (آفلاین) ادامه داده شد.',
+
+    'stream.answering': 'در حال نوشتن پاسخ…',
+
     'a11y.close': 'بستن',
     'a11y.back': 'بازگشت',
     'a11y.toggleTheme': 'تغییر پوسته',
@@ -253,6 +269,22 @@
     'err.llm': 'Model error: {msg}',
     'err.timeout': 'The run timed out.',
     'err.unsupported': 'This page is not a supported store. Run it on Digikala or Basalam.',
+
+    'banner.ollama.offline': 'Ollama is not reachable at localhost:11434. To use the local engine, run “ollama serve” in a terminal.',
+    'banner.ollama.modelMissing': 'The selected model is not installed in Ollama. Install it with “ollama pull <model>”.',
+    'banner.ollama.retry': 'Check again',
+    'banner.ollama.docs': 'Setup guide',
+    'banner.ollama.checking': 'Checking the Ollama service…',
+
+    'action.addToCart': 'Add to cart',
+    'action.done': 'Action completed',
+    'action.blocked': 'Payment, order placement and address changes are never automated — only you can do them on the site.',
+    'action.pending': 'Waiting for your confirmation in the side panel…',
+    'action.approve': 'Approve',
+    'action.cancel': 'Cancel',
+    'action.degraded': 'The model reply was invalid; continued with the offline parser.',
+
+    'stream.answering': 'Writing the answer…',
 
     'a11y.close': 'Close',
     'a11y.back': 'Back',

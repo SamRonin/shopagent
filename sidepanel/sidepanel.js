@@ -14,7 +14,7 @@
   'use strict';
 
   const SA = globalThis.ShopAgent;
-  const { utils, i18n, store, llm, sites } = SA;
+  const { utils, i18n, store, llm } = SA;
   const { t } = i18n;
   const log = utils.logger('ui');
 
@@ -34,6 +34,10 @@
     compare: new Map(), // id → product
     stepsEl: null,
     modelsCache: { ollama: null, groq: null, gemini: null },
+    // Streaming + Human-in-the-Loop runtime
+    streamBubble: null, // bot bubble currently receiving tokens
+    pendingConfirm: null, // { id, action, product }
+    ollamaProbeTimer: null,
   };
 
   /* ================================================================== *
@@ -484,6 +488,21 @@
     });
     actions.appendChild(cmpBtn);
 
+    // Add-to-cart goes through the validated ACT protocol and always
+    // asks for explicit confirmation first (Human-in-the-Loop).
+    if (p.url) {
+      const cartBtn = document.createElement('button');
+      cartBtn.type = 'button';
+      cartBtn.className = 'btn-tiny';
+      cartBtn.innerHTML = `<svg><use href="#i-cart" /></svg>`;
+      const cartLabel = document.createElement('span');
+      cartLabel.textContent = t('action.addToCart');
+      cartBtn.appendChild(cartLabel);
+      cartBtn.title = t('action.addToCart');
+      cartBtn.addEventListener('click', () => requestAddToCart(p));
+      actions.appendChild(cartBtn);
+    }
+
     main.appendChild(actions);
     card.appendChild(main);
     return card;
@@ -593,6 +612,7 @@
 
   async function run(text) {
     if (!text.trim() || state.running) return;
+    if (state.streamBubble) endStream(null, null);
     addUserMessage(text.trim());
     createSteps();
     updateStep('thinking', i18n.getLang() === 'fa' ? 'دستورت رو تحلیل می‌کنم…' : 'Understanding your request…');
@@ -614,9 +634,150 @@
   async function stop() {
     if (!state.taskId) return;
     await send('STOP_TASK', { taskId: state.taskId, tabId: state.tabContext?.tab?.id });
+    if (state.streamBubble) endStream(null, null);
     setRunning(false);
     finishSteps('error');
     addBotMessage(t('status.stopped'));
+  }
+
+  /* ================================================================== *
+   * Ollama service status banner (auto-detect localhost:11434)
+   * ================================================================== */
+
+  async function probeOllama({ quiet = false } = {}) {
+    if (!state.settings || state.settings.provider !== 'ollama') {
+      $('#serviceBanner').hidden = true;
+      return null;
+    }
+    const res = await send('OLLAMA_STATUS', { settings: state.settings });
+    if (!res.ok) {
+      showServiceBanner('error', t('banner.ollama.checking'), res.error || '');
+      return null;
+    }
+    if (res.online && res.modelMissing) {
+      showServiceBanner('warn', t('banner.ollama.modelMissing'), `${res.baseUrl || ''}`);
+    } else if (!res.online) {
+      showServiceBanner('error', t('banner.ollama.offline'), `${res.baseUrl || ''}`);
+    } else {
+      showServiceBanner('ok', t('conn.local'), res.models.length ? `${t('settings.model.detected')}: ${res.models.slice(0, 4).join('، ')}` : '');
+    }
+    if (!quiet) log.info('ollama probe:', res.online ? 'online' : res.error, res.models?.length ?? 0, 'models');
+    return res;
+  }
+
+  function showServiceBanner(kind, text, sub) {
+    const banner = $('#serviceBanner');
+    banner.hidden = false;
+    banner.classList.toggle('ok', kind === 'ok');
+    $('#serviceBannerDot').dataset.state = kind;
+    $('#serviceBannerTitle').textContent = text;
+    $('#serviceBannerText').textContent = sub || '';
+    $('#btnBannerRetry').textContent = t('banner.ollama.retry');
+    $('#btnBannerDocs').textContent = t('banner.ollama.docs');
+  }
+
+  function startOllamaProbing() {
+    stopOllamaProbing();
+    probeOllama();
+    state.ollamaProbeTimer = setInterval(() => {
+      if (state.settings?.provider === 'ollama') probeOllama({ quiet: true });
+      else $('#serviceBanner').hidden = true;
+    }, 60000);
+  }
+
+  function stopOllamaProbing() {
+    if (state.ollamaProbeTimer) {
+      clearInterval(state.ollamaProbeTimer);
+      state.ollamaProbeTimer = null;
+    }
+  }
+
+  /* ================================================================== *
+   * Streaming responses (low TTFT)
+   * ================================================================== */
+
+  function ensureStreamBubble() {
+    if (state.streamBubble && $('#stream').contains(state.streamBubble)) return state.streamBubble;
+    state.streamBubble = addBotMessage(t('stream.answering'), 'streaming');
+    return state.streamBubble;
+  }
+
+  function appendStream(text) {
+    const bubble = ensureStreamBubble();
+    bubble.querySelector('.bubble').textContent = text;
+    scrollToEnd(false);
+  }
+
+  function endStream(text, error) {
+    const bubble = state.streamBubble;
+    state.streamBubble = null;
+    if (!bubble) return;
+    const body = bubble.querySelector('.bubble');
+    body.classList.remove('streaming');
+    if (error) {
+      body.textContent = text ? `${text}\n\n⚠️ ${error}` : error;
+    } else if (text) {
+      body.textContent = text;
+    }
+  }
+
+  /* ================================================================== *
+   * Human-in-the-Loop confirmations
+   * ================================================================== */
+
+  function openConfirm(request) {
+    state.pendingConfirm = request;
+    const lang = i18n.getLang();
+    const copy = lang === 'en' ? request.en : request.fa;
+    $('#confirmTitle').textContent = copy.title;
+    $('#confirmBody').textContent = copy.body;
+    $('#btnConfirmApprove').textContent = t('action.approve');
+    $('#btnConfirmCancel').textContent = t('action.cancel');
+    $('#confirmLayer').hidden = false;
+    $('#btnConfirmApprove').focus();
+  }
+
+  function closeConfirm() {
+    state.pendingConfirm = null;
+    $('#confirmLayer').hidden = true;
+  }
+
+  async function answerConfirm(approve) {
+    const pending = state.pendingConfirm;
+    if (!pending) return;
+    closeConfirm();
+    if (!approve) {
+      toast(t('action.cancel'), 'ok', 1600);
+      return;
+    }
+    const res = await send('CONFIRM_ACTION', { confirmId: pending.id, approve: true });
+    if (!res.ok) {
+      addAlert(SA.errors.describe(res.error || 'ACTION_UNCONFIRMED', { lang: i18n.getLang() }), 'err');
+      return;
+    }
+    if (res.result?.ok) {
+      toast(t('action.done'), 'ok', 2000);
+    } else {
+      addAlert(SA.errors.describe(res.result?.error || 'ACTION_FAILED', { lang: i18n.getLang() }), 'err');
+    }
+  }
+
+  /** User pressed «add to cart» on a result card. */
+  async function requestAddToCart(product) {
+    if (!product?.url) return;
+    const res = await send('EXEC_ACTION', {
+      action: 'ADD_TO_CART',
+      params: {},
+      product: { title: product.title, url: product.url, price: product.price },
+      tabId: state.tabContext?.tab?.id,
+    });
+    if (!res.ok) {
+      addAlert(SA.errors.describe(res.error || 'ACTION_INVALID', { lang: i18n.getLang() }), 'err');
+      return;
+    }
+    if (res.pending) {
+      addBotMessage(t('action.pending'));
+    }
   }
 
   /* ================================================================== *
@@ -978,6 +1139,9 @@
     utils.setLogLevel(state.settings.debugLogs ? 'debug' : 'info');
     applyTheme(state.settings.theme);
     renderEngineStrip();
+    // The engine may have changed → re-check the local service banner.
+    if (next.provider === 'ollama') probeOllama();
+    else $('#serviceBanner').hidden = true;
     toast(t('settings.saved'), 'ok', 1700);
     log.debug('settings saved', store.redact(state.settings));
   }
@@ -1009,6 +1173,14 @@
       openDrawer('#drawerSettings');
     });
     $('#btnTestConn').addEventListener('click', () => testConnection({ fromButton: true }));
+
+    // Service banner (Ollama reachability)
+    $('#btnBannerRetry').addEventListener('click', () => probeOllama());
+    $('#btnBannerDocs').addEventListener('click', () => send('OPEN_DOCS', {}));
+
+    // Human-in-the-Loop confirmation
+    $('#btnConfirmApprove').addEventListener('click', () => answerConfirm(true));
+    $('#btnConfirmCancel').addEventListener('click', () => answerConfirm(false));
 
     // Store picker
     $$('#storePicker button').forEach((b) => {
@@ -1151,28 +1323,63 @@
         return;
       }
 
+      if (msg.type === 'SHOPAGENT_STREAM') {
+        // Live model tokens (question answers) — keeps TTFT low.
+        if (msg.taskId && state.taskId && msg.taskId !== state.taskId) return;
+        if (msg.kind === 'delta') {
+          appendStream(msg.text || '');
+          updateStep('thinking', t('stream.answering'), 'active');
+        } else if (msg.kind === 'done') {
+          endStream(msg.text || '', null);
+          finishSteps('done');
+        } else if (msg.kind === 'error') {
+          endStream(msg.text || '', msg.error || t('err.llm', { msg: 'unknown' }));
+          finishSteps('error');
+        }
+        return;
+      }
+
+      if (msg.type === 'SHOPAGENT_CONFIRM_REQUEST') {
+        // Human-in-the-Loop: the background will not act without this.
+        openConfirm(msg);
+        return;
+      }
+
+      if (msg.type === 'SHOPAGENT_CONFIRM_RESULT') {
+        if (state.pendingConfirm && state.pendingConfirm.id === msg.id) closeConfirm();
+        if (!msg.ok) addAlert(SA.errors.describe(msg.error || 'ACTION_UNCONFIRMED', { lang: i18n.getLang() }), 'warn');
+        else toast(t('action.done'), 'ok', 2000);
+        return;
+      }
+
       if (msg.type === 'SHOPAGENT_RESULT') {
         $('.skeletons')?.remove();
         setRunning(false);
         const result = msg.result || {};
+
+        // A question was answered by streaming; the bubble is the result.
+        if (result.question) {
+          endStream(result.answer || '', null);
+          finishSteps('done');
+          return;
+        }
+
         if (!result.ok) {
-          finishSteps(result.aborted ? 'error' : 'error');
+          finishSteps('error');
           if (!result.aborted) {
-            const map = {
-              NO_SEARCH_PATH: t('err.unsupported'),
-              NOT_ON_RESULTS_PAGE:
-                i18n.getLang() === 'fa'
-                  ? 'صفحهٔ نتایج جستجو تشخیص داده نشد. یک بار صفحهٔ فروشگاه را رفرش کن و دوباره امتحان کن.'
-                  : 'The search-results page could not be detected. Reload the store page once and try again.',
-              CONTENT_UNREACHABLE: t('err.inject'),
-              NO_TAB: t('err.noTab'),
-              EMPTY_QUERY: i18n.getLang() === 'fa' ? 'نتونستم بفهمم دنبال چه کالایی هستی. واضح‌تر بگو مثلاً «ایرپاد تا ۳ میلیون».' : 'I could not identify a product. Try something like "AirPods under 3M Tomans".',
-            };
-            const key = String(result.error || '').split(':')[0];
-            addAlert(map[key] || result.error || t('err.llm', { msg: 'unknown' }), 'err', result.error);
+            const code = String(result.error || '').split(':')[0];
+            addAlert(SA.errors.describe(code, { lang: i18n.getLang() }), 'err', result.error);
           }
           return;
         }
+
+        // Transparent degradation + blocked-action notices.
+        if (result.intent?.degraded) addAlert(t('action.degraded'), 'warn');
+        if (result.actionPlan?.risk === 'blocked') addAlert(t('action.blocked'), 'warn');
+        if (result.actionResult && !result.actionResult.ok) {
+          addAlert(SA.errors.describe(result.actionResult.error || 'ACTION_FAILED', { lang: i18n.getLang() }), 'err');
+        }
+
         state.lastResult = result;
         renderResults(result);
         return;
@@ -1269,6 +1476,9 @@
 
     // Silent health check so the engine dot is truthful on open.
     testConnection({ fromButton: false });
+
+    // Auto-detect the local Ollama service and keep the banner fresh.
+    startOllamaProbing();
 
     $('#command').focus();
     log.info('side panel ready');

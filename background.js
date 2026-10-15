@@ -6,9 +6,12 @@
  *   • tab lifecycle (pick / open / focus the right store tab)
  *   • content-script injection + a resilient PING/ACK handshake
  *   • the task pipeline: intent → navigate → type → scroll → filter →
- *     extract → rank
- *   • all model traffic (host permissions live here, so the side panel
- *     and content scripts never have to deal with CORS)
+ *     extract → rank → (optional) confirmed action
+ *   • all model traffic through background/providers/* (host
+ *     permissions live here, so the side panel and content scripts
+ *     never have to deal with CORS)
+ *   • token streaming (SHOPAGENT_STREAM) for low-TTFT answers
+ *   • Human-in-the-Loop confirmations (SHOPAGENT_CONFIRM_REQUEST)
  *   • progress broadcasting to the side panel + toolbar badge
  *   • a keep-alive heartbeat so the SW survives long LLM calls
  *
@@ -16,7 +19,23 @@
  * ------------------------------------------------------------------
  */
 
-importScripts('shared/utils.js', 'shared/locales.js', 'shared/i18n.js', 'shared/storage.js', 'shared/sites.js', 'shared/llm.js');
+importScripts(
+  'shared/utils.js',
+  'shared/errors.js',
+  'shared/act.js',
+  'shared/locales.js',
+  'shared/i18n.js',
+  'shared/storage.js',
+  'shared/sites.js',
+  'content/adapters/digikala.js',
+  'content/adapters/basalam.js',
+  'content/adapters/index.js',
+  'background/providers/index.js',
+  'background/providers/ollama.js',
+  'background/providers/groq.js',
+  'background/providers/gemini.js',
+  'shared/llm.js'
+);
 
 const SA = globalThis.ShopAgent;
 const log = SA.utils.logger('background');
@@ -24,7 +43,7 @@ const log = SA.utils.logger('background');
 /** Hosts we are allowed to automate. Mirrors manifest.content_scripts.matches. */
 const SUPPORTED_HOSTS = ['digikala.com', 'basalam.com'];
 
-const CONTENT_FILES = ['shared/utils.js', 'shared/sites.js', 'content/content.js'];
+const CONTENT_FILES = ['shared/utils.js', 'shared/sites.js', 'content/adapters/digikala.js', 'content/adapters/basalam.js', 'content/adapters/index.js', 'content/actions/dom.js', 'content/actions/interact.js', 'content/actions/extract.js', 'content/actions/hud.js', 'content/content.js'];
 const CONTENT_CSS = ['content/content.css'];
 
 /* ================================================================== *
@@ -61,6 +80,13 @@ function emitProgress(taskId, status, detail, extra = {}) {
   chrome.runtime.sendMessage(payload).catch(() => {});
   setBadge(status);
   log.info(`[${taskId}] ${status}${detail ? ` — ${detail}` : ''}`);
+}
+
+/** Emit a failure with provider-aware, user-language guidance. */
+function emitFail(taskId, code, lang, extra = {}) {
+  const detail = SA.errors.describe(code, { lang, provider: extra.provider });
+  emitProgress(taskId, 'error', detail, { errorCode: SA.errors.codeOf(code), ...extra });
+  return detail;
 }
 
 const BADGE = {
@@ -144,7 +170,7 @@ async function resolveTab(store, { focus = true } = {}) {
     return { tab: current, created: false };
   }
 
-  const wanted = SA.sites[store] || SA.sites.digikala;
+  const wanted = SA.sites.byId(store);
   const wantedHosts = wanted.hosts || [];
 
   // 1. The active tab is already the right store.
@@ -229,7 +255,6 @@ async function pageKindOf(tab) {
 /**
  * HARD GUARANTEE: no scrolling / extraction may happen unless the tab is
  * showing a genuine search-results listing.
- *
  *   1. the live SEARCH already landed on a results URL  → done
  *   2. the tab is already on a results URL (refining)   → done
  *   3. otherwise navigate to the adapter's search URL   → verify again
@@ -274,6 +299,70 @@ async function ensureOnResultsPage(tab, adapter, settings, { liveSearch, templat
 }
 
 /* ================================================================== *
+ * Human-in-the-Loop confirmations
+ * ================================================================== */
+
+const pendingConfirms = new Map(); // confirmId → { action, params, product, taskId, tabId, resolve, timer }
+
+/**
+ * Ask the side panel to approve a `confirm`-risk action.
+ * @returns {{id:string, promise:Promise<{approved:boolean, result?:object}>}}
+ */
+function requestConfirmation({ action, params, product, taskId, tabId }) {
+  const id = SA.utils.uid('confirm');
+  let resolve;
+  const promise = new Promise((r) => {
+    resolve = r;
+  });
+  const timer = setTimeout(() => {
+    if (!pendingConfirms.has(id)) return;
+    pendingConfirms.delete(id);
+    broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id, ok: false, error: 'ACTION_UNCONFIRMED' });
+    resolve({ approved: false, error: 'ACTION_UNCONFIRMED' });
+  }, 180000);
+
+  pendingConfirms.set(id, { action, params, product, taskId, tabId, resolve, timer });
+
+  const fa = SA.act.buildConfirmation(action, { ...params, productTitle: product?.title }, 'fa');
+  const en = SA.act.buildConfirmation(action, { ...params, productTitle: product?.title }, 'en');
+  broadcast({ type: 'SHOPAGENT_CONFIRM_REQUEST', id, action, params, product: product ? { title: product.title, url: product.url, price: product.price } : null, fa, en });
+  return { id, promise };
+}
+
+/** Execute a validated action on a tab (safe actions only reach here). */
+async function executeActionOnTab(verdict, tabId, product) {
+  const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : await activeTab();
+  if (!tab) return { ok: false, error: 'NO_TAB' };
+
+  if (verdict.action === 'OPEN_PRODUCT') {
+    await chrome.tabs.update(tab.id, { url: verdict.params.url, active: true }).catch(() => {});
+    return { ok: true, action: 'OPEN_PRODUCT', url: verdict.params.url };
+  }
+
+  // ADD_TO_CART only makes sense on the product page: open it first.
+  if (verdict.action === 'ADD_TO_CART') {
+    const url = verdict.params.url || product?.url;
+    if (url) {
+      const current = hostOf(tab.url || '');
+      const target = hostOf(url);
+      if (!current || !target || current !== target || !/\/(product|p)\//i.test(tab.url || '')) {
+        await chrome.tabs.update(tab.id, { url, active: true }).catch(() => {});
+        await waitForTab(tab.id, { timeout: 30000 }).catch(() => {});
+        await SA.utils.sleep(600);
+      }
+    }
+  }
+
+  try {
+    await ensureContent(tab.id);
+    const res = await sendToContent(tab.id, 'ACT', { action: verdict.action, params: verdict.params });
+    return { ok: Boolean(res?.ok), action: verdict.action, result: res, error: res?.ok ? null : res?.error || 'ACTION_FAILED' };
+  } catch (err) {
+    return { ok: false, action: verdict.action, error: String(err?.message || err) };
+  }
+}
+
+/* ================================================================== *
  * The pipeline
  * ================================================================== */
 
@@ -292,9 +381,46 @@ async function runTask(taskId, { text, store, tabId, settings }) {
     const intent = await SA.llm.parseIntent(text, settings, { signal });
     emitProgress(taskId, 'thinking', intent.explanation || intent.query, { intent });
 
+    if (intent.degraded) {
+      emitProgress(taskId, 'thinking', SA.errors.describe('BAD_JSON', { lang }), { degraded: intent.degradedReason });
+    }
+
     if (intent.intent === 'unknown' || !intent.query) {
-      emitProgress(taskId, 'error', lang === 'fa' ? 'نتونستم بفهمم دنبال چه کالایی هستی.' : 'Could not identify a product in your request.');
+      emitFail(taskId, 'EMPTY_QUERY', lang);
       return { ok: false, error: 'EMPTY_QUERY', intent, products: [] };
+    }
+
+    /* ---------- 1b. Pure question → streamed answer, no scraping ---------- */
+    if (intent.intent === 'question') {
+      emitProgress(taskId, 'thinking', lang === 'fa' ? 'دارم جواب می‌دم…' : 'Answering…');
+      const messages = [
+        {
+          role: 'system',
+          content:
+            lang === 'fa'
+              ? 'تو دستیار «خرید‌یار» هستی. کوتاه، دقیق و به فارسی جواب بده. هرگز نگو پرداخت یا ثبت سفارش را انجام می‌دهی؛ این کارها فقط توسط خود کاربر در سایت انجام می‌شوند.'
+              : 'You are the ShopAgent assistant. Answer briefly and precisely. Never claim to pay or place orders — the user does those on the site.',
+        },
+        { role: 'user', content: text },
+      ];
+      let streamed = '';
+      const res = await SA.llm.streamChat(settings, {
+        messages,
+        signal,
+        onDelta: (delta) => {
+          // Accumulate here: providers only guarantee the delta itself.
+          streamed += delta || '';
+          broadcast({ type: 'SHOPAGENT_STREAM', taskId, kind: 'delta', text: streamed });
+        },
+      });
+      const answer = streamed || res.text || '';
+      broadcast({ type: 'SHOPAGENT_STREAM', taskId, kind: res.ok ? 'done' : 'error', text: answer, error: res.ok ? null : SA.errors.describe(res.error, { lang, provider: settings.provider }) });
+      if (!res.ok && !answer) {
+        emitFail(taskId, res.error, lang, { provider: settings.provider });
+        return { ok: false, error: res.error, intent, products: [] };
+      }
+      emitProgress(taskId, 'ready', lang === 'fa' ? 'پاسخ آماده است' : 'Answer ready', { answer });
+      return { ok: true, intent, answer, question: true, taskId, query: text, at: Date.now() };
     }
 
     /* ---------- 2. Resolve the tab ---------- */
@@ -307,7 +433,7 @@ async function runTask(taskId, { text, store, tabId, settings }) {
       tab = tabId ? await chrome.tabs.get(tabId).catch(() => resolved.tab) : resolved.tab;
       tab = await waitForTab(tab.id);
     } catch (e) {
-      emitProgress(taskId, 'error', String(e.message || e));
+      emitFail(taskId, String(e.message || e), lang);
       return { ok: false, error: 'TAB_ERROR', detail: String(e.message || e), intent, products: [] };
     }
 
@@ -326,7 +452,7 @@ async function runTask(taskId, { text, store, tabId, settings }) {
     log.info('content ready on', ping.store, ping.url);
 
     /* ---------- 3. Search: type it live ---------- */
-    const adapter = SA.sites[ping.store] || SA.sites.detect(tab.url);
+    const adapter = SA.sites.byId(ping.store).id === 'generic' ? SA.sites.detect(tab.url) : SA.sites.byId(ping.store);
     const templates = typeof adapter.searchUrl === 'function' ? adapter.searchUrl(intent.query) : [];
     let searchResult = null;
 
@@ -355,7 +481,7 @@ async function runTask(taskId, { text, store, tabId, settings }) {
     });
 
     if (!gate.ok) {
-      emitProgress(taskId, 'error', lang === 'fa' ? 'نتوانستم به صفحهٔ نتایج جستجو بروم.' : 'Could not reach a search-results page.');
+      emitFail(taskId, gate.error || 'NO_SEARCH_PATH', lang);
       return { ok: false, error: gate.error || 'NO_SEARCH_PATH', intent, products: [] };
     }
     tab = gate.tab || tab;
@@ -388,7 +514,7 @@ async function runTask(taskId, { text, store, tabId, settings }) {
     emitProgress(taskId, 'analyzing', lang === 'fa' ? 'خوندن قیمت‌ها و مشخصات' : 'Reading prices and specs');
     const extraction = await sendToContent(tab.id, 'EXTRACT', { limit: 80 }, 60000);
     if (!extraction || !extraction.ok) {
-      emitProgress(taskId, 'error', extraction?.error || 'EXTRACT_FAILED');
+      emitFail(taskId, 'EXTRACT_FAILED', lang);
       return { ok: false, error: 'EXTRACT_FAILED', intent, products: [] };
     }
 
@@ -414,13 +540,7 @@ async function runTask(taskId, { text, store, tabId, settings }) {
     /* ---------- 7. Rank ---------- */
     emitProgress(taskId, 'ranking', lang === 'fa' ? 'انتخاب بهترین گزینه‌ها' : 'Picking the best options');
     const maxPicks = intent.maxResults || settings.maxResults || 6;
-    const ranked = await SA.llm.rankProducts(products, intent, {
-      settings,
-      userText: text,
-      lang,
-      maxPicks,
-      signal,
-    });
+    const ranked = await SA.llm.rankProducts(products, intent, { settings, userText: text, lang, maxPicks, signal });
 
     const durationMs = Date.now() - startedAt;
     const payload = {
@@ -433,6 +553,40 @@ async function runTask(taskId, { text, store, tabId, settings }) {
       query: text,
       at: Date.now(),
     };
+
+    /* ---------- 8. Optional follow-up action (validated + confirmed) ---------- */
+    if (intent.action && ranked.length) {
+      const plan = await SA.llm.planAction(ranked[0], intent, settings, { signal, lang });
+      const verdict = plan.plan;
+      payload.actionPlan = { action: verdict.action, risk: verdict.risk, source: plan.source, degradedReason: plan.degradedReason || null };
+
+      if (verdict.risk === 'blocked') {
+        emitProgress(taskId, 'filtering', SA.errors.describe('ACTION_BLOCKED', { lang }));
+      } else if (verdict.risk === 'confirm') {
+        emitProgress(taskId, 'filtering', lang === 'fa' ? 'منتظر تأیید شما در سایدپنل…' : 'Waiting for your confirmation in the side panel…');
+        const { promise } = requestConfirmation({
+          action: verdict.action,
+          params: verdict.params,
+          product: ranked[0],
+          taskId,
+          tabId: tab.id,
+        });
+        const outcome = await promise;
+        if (outcome.approved && outcome.result) {
+          payload.actionResult = outcome.result;
+          emitProgress(taskId, 'ready', outcome.result.ok
+            ? lang === 'fa'
+              ? 'کالا به سبد خرید اضافه شد'
+              : 'Item added to the cart'
+            : SA.errors.describe(outcome.result.error || 'ACTION_FAILED', { lang }));
+        } else {
+          emitProgress(taskId, 'filtering', SA.errors.describe(outcome.error || 'ACTION_UNCONFIRMED', { lang }));
+        }
+      } else if (verdict.action === 'OPEN_PRODUCT' && verdict.params.url) {
+        await chrome.tabs.update(tab.id, { url: verdict.params.url, active: true }).catch(() => {});
+        payload.actionResult = { ok: true, action: 'OPEN_PRODUCT', url: verdict.params.url };
+      }
+    }
 
     emitProgress(taskId, 'ready', lang === 'fa' ? `${ranked.length} پیشنهاد آماده شد` : `${ranked.length} picks ready`, { count: ranked.length });
     chrome.storage.local.set({ lastRun: payload }).catch(() => {});
@@ -454,12 +608,16 @@ async function runTask(taskId, { text, store, tabId, settings }) {
  * Message routing
  * ================================================================== */
 
+function broadcast(message) {
+  chrome.runtime.sendMessage(message).catch(() => {});
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return false;
 
   // Content scripts relay their own live events straight to the UI.
   if (msg.type === 'SHOPAGENT_EVENT') {
-    chrome.runtime.sendMessage({ type: 'SHOPAGENT_LIVE_EVENT', ...msg, tabId: sender.tab?.id }).catch(() => {});
+    broadcast({ type: 'SHOPAGENT_LIVE_EVENT', ...msg, tabId: sender.tab?.id });
     return false;
   }
 
@@ -495,17 +653,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
-        case 'LIST_MODELS': {
-          const settings = msg.settings || (await SA.store.getSettings());
-          const result = await SA.llm.listModels(settings);
-          sendResponse({ ok: result.ok, result });
-          break;
-        }
-
         case 'PARSE_LOCAL': {
           // Instant, offline preview of what the rule-based parser sees.
           const settings = await SA.store.getSettings();
           sendResponse({ ok: true, intent: SA.llm.builtinParseIntent(msg.text || '', settings) });
+          break;
+        }
+
+        case 'OLLAMA_STATUS': {
+          // Side-panel status banner: is the local service alive?
+          const settings = msg.settings || (await SA.store.getSettings());
+          const base = settings.ollama?.baseUrl || 'http://localhost:11434';
+          const ollama = SA.providers.get('ollama');
+          const res = ollama ? await ollama.ping(base, { timeoutMs: msg.timeoutMs || 4000 }) : { ok: false, online: false, error: 'NO_PROVIDER', models: [] };
+          const configured = settings.ollama?.model;
+          const modelMissing =
+            res.online && configured && res.models.length > 0 && !res.models.some((m) => m === configured || m.startsWith(configured + ':'));
+          sendResponse({ ok: true, online: res.online === true, models: res.models || [], modelMissing, latencyMs: res.latencyMs, error: res.error || null, baseUrl: base });
           break;
         }
 
@@ -532,7 +696,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             tabId: msg.tabId,
             settings,
           }).then((result) => {
-            chrome.runtime.sendMessage({ type: 'SHOPAGENT_RESULT', taskId, result }).catch(() => {});
+            broadcast({ type: 'SHOPAGENT_RESULT', taskId, result });
           });
           break;
         }
@@ -580,6 +744,57 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             temperature: msg.temperature,
           });
           sendResponse(res);
+          break;
+        }
+
+        /* ---------- Validated actions + Human-in-the-Loop ---------- */
+
+        case 'EXEC_ACTION': {
+          const settings = msg.settings || (await SA.store.getSettings());
+          const lang = settings.language || 'fa';
+          const verdict = SA.act.validate({ action: msg.action, params: msg.params });
+          if (!verdict.ok) {
+            sendResponse({ ok: false, error: verdict.error, message: SA.errors.describe(verdict.error, { lang }) });
+            break;
+          }
+          if (verdict.risk === 'blocked') {
+            sendResponse({ ok: false, error: 'ACTION_BLOCKED', message: SA.errors.describe('ACTION_BLOCKED', { lang }) });
+            break;
+          }
+          if (verdict.risk === 'confirm') {
+            const { id } = requestConfirmation({ action: verdict.action, params: verdict.params, product: msg.product || null, tabId: msg.tabId });
+            sendResponse({ ok: true, pending: true, confirmId: id });
+            break;
+          }
+          const result = await executeActionOnTab(verdict, msg.tabId, msg.product || null);
+          sendResponse({ ok: result.ok, result, message: result.ok ? null : SA.errors.describe(result.error, { lang }) });
+          break;
+        }
+
+        case 'CONFIRM_ACTION': {
+          const pending = pendingConfirms.get(msg.confirmId);
+          if (!pending) {
+            sendResponse({ ok: false, error: 'CONFIRM_EXPIRED' });
+            break;
+          }
+          pendingConfirms.delete(msg.confirmId);
+          clearTimeout(pending.timer);
+          if (!msg.approve) {
+            broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id: msg.confirmId, ok: false, error: 'ACTION_UNCONFIRMED' });
+            sendResponse({ ok: false, error: 'ACTION_UNCONFIRMED' });
+            break;
+          }
+          const verdict = SA.act.validate({ action: pending.action, params: pending.params });
+          if (!verdict.ok || verdict.risk === 'blocked') {
+            const error = verdict.ok ? 'ACTION_BLOCKED' : verdict.error;
+            broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id: msg.confirmId, ok: false, error });
+            sendResponse({ ok: false, error });
+            break;
+          }
+          const result = await executeActionOnTab(verdict, pending.tabId, pending.product);
+          broadcast({ type: 'SHOPAGENT_CONFIRM_RESULT', id: msg.confirmId, ok: result.ok, result });
+          pending.resolve({ approved: true, result });
+          sendResponse({ ok: result.ok, result });
           break;
         }
 

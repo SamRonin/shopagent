@@ -1,166 +1,43 @@
 /**
  * ShopAgent — shared/sites.js
  * ------------------------------------------------------------------
- * Store adapters.
+ * Store-adapter REGISTRY + the generic heuristic engine.
  *
- * Design rule: **never trust a single selector.** Every adapter declares
- * an ordered list of candidate selectors; if all of them miss, the
- * generic heuristic engine (bottom of this file) reconstructs the page
- * model from first principles. That way a small CSS change on Digikala
- * or Basalam degrades gracefully instead of breaking the whole run.
+ * Design rule: **never trust a single selector.** Concrete adapters
+ * (`content/adapters/digikala.js`, `content/adapters/basalam.js`,
+ * `content/adapters/generic.js`) self-register here via
+ * `ShopAgent.sites.register(...)`. Every adapter declares an *ordered*
+ * list of candidate selectors; if all of them miss, the heuristic
+ * engine at the bottom of this file reconstructs the page model from
+ * first principles. A small CSS change on Digikala or Basalam then
+ * degrades gracefully instead of breaking the whole run.
+ *
+ * This file must be loaded BEFORE any adapter file, and AFTER
+ * shared/utils.js. It is context-free (no DOM, no chrome.* APIs).
  * ------------------------------------------------------------------
  */
 (function (root) {
   'use strict';
   const ShopAgent = (root.ShopAgent = root.ShopAgent || {});
-  const { normalizeText, parsePrice, absoluteUrl, similarity } = ShopAgent.utils;
+  const { normalizeText, parsePrice, absoluteUrl } = ShopAgent.utils;
 
   /* ------------------------------------------------------------------ *
-   * Adapters
+   * Registry
    * ------------------------------------------------------------------ */
 
-  const digikala = {
-    id: 'digikala',
-    nameKey: 'store.digikala',
-    label: 'دیجی‌کالا',
-    labelEn: 'Digikala',
-    hosts: ['www.digikala.com', 'digikala.com', 'm.digikala.com'],
-    home: 'https://www.digikala.com/',
-    /** Tried in order; the first reachable template wins. */
-    searchUrl: (q) => [
-      `https://www.digikala.com/search/?q=${encodeURIComponent(q)}`,
-      `https://www.digikala.com/search?q=${encodeURIComponent(q)}`,
-    ],
-    productLinkRe: /\/product\/(dkp-|\d)/i,
-    categoryLinkRe: /\/(product|search|category|list)\//i,
-    selectors: {
-      searchInput: [
-        'input[type="search"][name="q"]',
-        '#search-input-digitalkala',
-        'input#search-input',
-        'input[placeholder*="جستجو"]',
-        'input[aria-label*="جستجو"]',
-        'form[action*="/search"] input[type="text"]',
-        'form[action*="/search"] input[type="search"]',
-        'header input[type="search"]',
-        'input[type="search"]',
-      ],
-      searchSubmit: [
-        'form[action*="/search"] button[type="submit"]',
-        'button[aria-label*="جستجو"]',
-        'button[type="submit"]',
-      ],
-      productCard: [
-        '[data-testid="productCard"]',
-        'div.product-card',
-        'div[class*="productCard"]',
-        'ul.product-list > li',
-        'div[class*="product-list"] > div',
-        'div[class*="ProductList"] > div',
-        'main li:has(a[href*="/product/"])',
-        'div:has(> a[href*="/product/"])',
-      ],
-      productTitle: [
-        '[data-testid="productTitle"]',
-        'h2',
-        'h3',
-        'span[class*="title"]',
-        'div[class*="title"]',
-        'a[href*="/product/"]',
-      ],
-      productLink: ['a[href*="/product/"]', 'a[data-testid*="product"]', 'a[href]'],
-      productPrice: [
-        '[data-testid="price"]',
-        'div[class*="price"]',
-        'span[class*="price"]',
-        'div[class*="Price"]',
-      ],
-      productImage: ['img[src]', 'img[data-src]', 'picture img'],
-      productRating: ['[class*="rating"]', '[class*="Rating"]', '[data-testid*="rating"]'],
-      productSeller: ['[class*="seller"]', '[class*="Seller"]'],
-      discountBadge: ['[class*="discount"]', '[class*="Discount"]', '[class*="off"]'],
-      sortControl: ['select[class*="sort"]', '[class*="sort"] button', '[data-testid*="sort"]'],
-      nextPage: ['a[rel="next"]', 'button[aria-label*="بعدی"]', 'a[class*="next"]'],
-      loadMore: ['button[class*="more"]', 'button:has(span)'],
-    },
-    /** Persian UI labels used by the click-by-text strategy. */
-    labels: {
-      sort: {
-        bestselling: ['پرفروش‌ترین', 'پرفروش ترین', 'محبوب‌ترین'],
-        cheapest: ['ارزان‌ترین', 'ارزان ترین', 'کمترین قیمت'],
-        expensive: ['گران‌ترین', 'بیشترین قیمت'],
-        newest: ['جدید‌ترین', 'جدیدترین', 'تازه‌ترین'],
-        best_match: ['مرتبط‌ترین', 'بهترین تطابق', 'مرتبط ترین'],
-        discount: ['بیشترین تخفیف'],
-      },
-      priceFilterHeading: ['محدوده قیمت', 'قیمت', 'بازه قیمت'],
-      apply: ['اعمال', 'ثبت', 'تایید', 'اعمال فیلتر'],
-    },
-    /** Optional URL-level sort hints (best-effort, UI clicking is primary). */
-    urlSort: { cheapest: { sort: 5 }, expensive: { sort: 6 }, newest: { sort: 4 }, bestselling: { sort: 8 }, best_match: { sort: 1 } },
-  };
+  const ADAPTERS = [];
 
-  const basalam = {
-    id: 'basalam',
-    nameKey: 'store.basalam',
-    label: 'باسلام',
-    labelEn: 'Basalam',
-    hosts: ['basalam.com', 'www.basalam.com'],
-    home: 'https://basalam.com/',
-    searchUrl: (q) => [
-      `https://basalam.com/search?q=${encodeURIComponent(q)}`,
-      `https://basalam.com/fa/search?q=${encodeURIComponent(q)}`,
-      `https://basalam.com/products?q=${encodeURIComponent(q)}`,
-    ],
-    productLinkRe: /\/(product|p)\//i,
-    categoryLinkRe: /\/(product|search|category|shop)\//i,
-    selectors: {
-      searchInput: [
-        'input[name="q"]',
-        'input[type="search"]',
-        'input[placeholder*="جستجو"]',
-        'input[placeholder*="دنبال"]',
-        'input[aria-label*="جستجو"]',
-        'form[action*="search"] input',
-        'header input',
-      ],
-      searchSubmit: ['form[action*="search"] button[type="submit"]', 'button[aria-label*="جستجو"]', 'button[type="submit"]'],
-      productCard: [
-        '[data-testid*="product"]',
-        'article',
-        'div[class*="product-card"]',
-        'div[class*="productCard"]',
-        'div[class*="product_card"]',
-        'main div:has(> a[href*="/product/"])',
-        'li:has(a[href*="/product/"])',
-      ],
-      productTitle: ['h2', 'h3', '[class*="title"]', 'a[href*="/product/"]'],
-      productLink: ['a[href*="/product/"]', 'a[href]'],
-      productPrice: ['[class*="price"]', '[class*="Price"]', '[class*="cost"]'],
-      productImage: ['img[src]', 'img[data-src]'],
-      productRating: ['[class*="rating"]', '[class*="star"]'],
-      productSeller: ['[class*="seller"]', '[class*="shop"]', 'a[href*="/shop"]'],
-      discountBadge: ['[class*="discount"]', '[class*="off"]', '[class*="takhfif"]'],
-      sortControl: ['select', '[class*="sort"] button', '[class*="sort"]'],
-      nextPage: ['a[rel="next"]', 'button[aria-label*="بعدی"]'],
-      loadMore: ['button[class*="more"]'],
-    },
-    labels: {
-      sort: {
-        bestselling: ['پرفروش‌ترین', 'محبوب‌ترین', 'پرفروش'],
-        cheapest: ['ارزان‌ترین', 'کمترین قیمت', 'ارزان'],
-        expensive: ['گران‌ترین', 'بیشترین قیمت'],
-        newest: ['جدید‌ترین', 'تازه‌ترین', 'جدید'],
-        best_match: ['مرتبط‌ترین', 'بهترین', 'پیشنهادی'],
-        discount: ['بیشترین تخفیف', 'تخفیف'],
-      },
-      priceFilterHeading: ['محدوده قیمت', 'قیمت'],
-      apply: ['اعمال', 'ثبت', 'تایید'],
-    },
-    urlSort: {},
-  };
-
-  const ADAPTERS = [digikala, basalam];
+  /**
+   * Register a concrete store adapter. Called at load time by every
+   * file in `content/adapters/`. Duplicate ids replace the old entry
+   * so a reload of the content script never doubles the list.
+   */
+  function register(adapter) {
+    if (!adapter || typeof adapter !== 'object' || !adapter.id) return;
+    const existing = ADAPTERS.findIndex((a) => a.id === adapter.id);
+    if (existing >= 0) ADAPTERS[existing] = adapter;
+    else ADAPTERS.push(adapter);
+  }
 
   /** A neutral adapter so the agent still works on any other shop. */
   const generic = {
@@ -170,7 +47,7 @@
     labelEn: 'Current store',
     hosts: [],
     home: null,
-    searchUrl: (q) => [],
+    searchUrl: () => [],
     productLinkRe: /\/(product|item|p|dp|goods)\//i,
     categoryLinkRe: /./i,
     selectors: {
@@ -187,19 +64,23 @@
       sortControl: ['select'],
       nextPage: ['a[rel="next"]'],
       loadMore: [],
+      addToCart: [],
     },
     labels: {
       sort: { bestselling: ['پرفروش'], cheapest: ['ارزان'], expensive: ['گران'], newest: ['جدید'], best_match: ['مرتبط'], discount: ['تخفیف'] },
       priceFilterHeading: ['قیمت'],
       apply: ['اعمال', 'apply'],
+      addToCart: ['افزودن به سبد خرید', 'افزودن به سبد', 'اضافه به سبد', 'خرید نقدی', 'add to cart', 'add to basket'],
+      inCart: ['در سبد خرید', 'به سبد اضافه شد', 'سبد خرید'],
     },
     urlSort: {},
   };
 
   function detect(url) {
+    let host = '';
     try {
       const u = new URL(url || (typeof location !== 'undefined' ? location.href : ''));
-      const host = u.hostname.replace(/^www\./, '');
+      host = u.hostname.replace(/^www\./, '');
       for (const a of ADAPTERS) {
         if (a.hosts.some((h) => host === h || host.endsWith('.' + h))) return a;
       }
@@ -207,6 +88,11 @@
     } catch {
       return generic;
     }
+  }
+
+  /** Adapter by id (`digikala`, `basalam`, …) or the generic fallback. */
+  function byId(id) {
+    return ADAPTERS.find((a) => a.id === id) || generic;
   }
 
   /**
@@ -336,14 +222,17 @@
     }
 
     if (!best) return scored.sort((a, b) => b.score - a.score).slice(0, limit).map((s) => s.el);
-    return best.items.sort((a, b) => a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1).map((s) => s.el).slice(0, limit);
+    return best.items
+      .sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+      .map((s) => s.el)
+      .slice(0, limit);
   }
 
   ShopAgent.sites = {
     ADAPTERS,
     generic,
-    digikala,
-    basalam,
+    register,
+    byId,
     detect,
     classifyUrl,
     list,

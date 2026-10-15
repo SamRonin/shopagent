@@ -289,23 +289,6 @@
     return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  function debounce(fn, wait = 250) {
-    let t;
-    return function (...args) {
-      clearTimeout(t);
-      t = setTimeout(() => fn.apply(this, args), wait);
-    };
-  }
-
-  function escapeHtml(input) {
-    return String(input ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
   /** Jaccard-ish token overlap in [0,1] — used for title/query relevance. */
   function similarity(a, b) {
     const ta = new Set(normalizeText(a).split(' ').filter(Boolean));
@@ -375,8 +358,6 @@
     randInt,
     clamp,
     uid,
-    debounce,
-    escapeHtml,
     similarity,
     absoluteUrl,
     logger,

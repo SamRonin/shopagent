@@ -24,12 +24,15 @@ jobs:
 
       - name: Syntax check every JS file
         run: |
-          for f in shared/*.js content/content.js background.js sidepanel/sidepanel.js scripts/*.js; do
+          for f in shared/*.js content/adapters/*.js content/actions/*.js content/content.js background/providers/*.js background.js sidepanel/sidepanel.js scripts/*.js; do
             node --check "$f" || exit 1
           done
 
       - name: Shared-module self tests
         run: node scripts/selftest.js
+
+      - name: Protocol integration tests (stubbed chrome)
+        run: node scripts/protocol.test.js
 
       - name: Cross-file consistency (manifest / html / i18n / messages)
         run: node scripts/validate.js

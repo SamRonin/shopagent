@@ -8,6 +8,9 @@
  *      for BOTH languages
  *   4. every $('#id') used by sidepanel.js exists in sidepanel.html
  *   5. every t('key') used by JS exists in both locales
+ *   6. message-type contract (background ⇄ panel ⇄ content)
+ *   7. content/actions/*: every bare utils call is destructured
+ *   8. every importScripts / provider registration is consistent
  *
  * Usage: node scripts/validate.js   → exit 0 when clean
  */
@@ -131,23 +134,76 @@ const missingContent = [...bgToContent].filter((a) => !contentActions.has(a));
 missingContent.length ? bad(`background calls missing content actions: ${missingContent.join(', ')}`) : good(`all ${bgToContent.size} background→content actions exist`);
 
 /* ---------------------------------------------------------------- 7 */
-console.log('\n\x1b[36m▸ content.js: every bare utils call is destructured\x1b[0m');
+console.log('\n\x1b[36m▸ content/actions/*: every bare utils call is destructured\x1b[0m');
 {
   (0, eval)(read('shared/utils.js'));
   const utilsExports = Object.keys(globalThis.ShopAgent.utils);
-  const src = read('content/content.js');
-  const block = src.match(/const \{([\s\S]*?)\} = utils;/);
-  if (!block) {
-    bad('content.js: could not locate the `const { ... } = utils` destructure block');
-  } else {
-    const destructured = new Set([...block[1].matchAll(/^\s*([A-Za-z0-9_]+)\s*=/gm)].map((x) => x[1]));
-    const body = src.slice(block.index + block[0].length);
-    const missing = utilsExports.filter(
-      (k) => new RegExp(`(?<![.\\w])${k}\\s*\\(`).test(body) && !destructured.has(k)
+  const actionFiles = fs
+    .readdirSync(path.join(ROOT, 'content/actions'))
+    .filter((f) => f.endsWith('.js'))
+    .map((f) => `content/actions/${f}`);
+
+  for (const rel of actionFiles) {
+    const src = read(rel);
+    const block = src.match(/const \{([\s\S]*?)\} = ShopAgent\.utils;/);
+    if (!block) {
+      bad(`${rel}: could not locate the \`const { ... } = ShopAgent.utils\` destructure block`);
+      continue;
+    }
+    // Names may appear bare (`clamp`) or with defaults (`sleep = 0`).
+    const destructured = new Set(
+      block[1]
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => (s.includes('=') ? s.slice(0, s.indexOf('=')).trim() : s))
+        .map((s) => s.replace(/^\.\.\./, ''))
+        .filter((s) => /^[A-Za-z0-9_]+$/.test(s))
     );
+    const body = src.slice(block.index + block[0].length);
+    const missing = utilsExports.filter((k) => new RegExp(`(?<![.\\w])${k}\\s*\\(`).test(body) && !destructured.has(k));
     missing.length
-      ? bad(`content.js uses utils exports that are not destructured: ${missing.join(', ')}  (→ ReferenceError at runtime)`)
-      : good(`all ${destructured.size} destructured utils bindings cover every bare call`);
+      ? bad(`${rel} uses utils exports that are not destructured: ${missing.join(', ')}  (→ ReferenceError at runtime)`)
+      : good(`${rel}: ${destructured.size} destructured utils bindings cover every bare call`);
+  }
+}
+
+/* ---------------------------------------------------------------- 8 */
+console.log('\n\x1b[36m▸ background importScripts + provider registrations\x1b[0m');
+{
+  const bg = read('background.js');
+  const imports = [...bg.matchAll(/importScripts\(([\s\S]*?)\);/g)].flatMap((m) =>
+    [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])
+  );
+  if (!imports.length) bad('background.js: no importScripts(...) call found');
+  for (const f of imports) exists(f) ? good(f) : bad(`background.js imports a missing file: ${f}`);
+
+  // utils must come first — every module destructures from it at load time.
+  if (imports[0] !== 'shared/utils.js') bad(`background.js: shared/utils.js must be imported first (got ${imports[0]})`);
+  else good('shared/utils.js is imported before everything else');
+
+  // shared/llm.js must load after the providers it dispatches to.
+  const llmIdx = imports.indexOf('shared/llm.js');
+  const providerIdx = imports.findIndex((f) => f.startsWith('background/providers/'));
+  if (llmIdx === -1 || providerIdx === -1 || providerIdx > llmIdx) bad('background.js: providers must be imported before shared/llm.js');
+  else good('providers are imported before shared/llm.js');
+
+  // Every provider file registers itself under its own filename.
+  const providerFiles = fs
+    .readdirSync(path.join(ROOT, 'background/providers'))
+    .filter((f) => f.endsWith('.js') && f !== 'index.js')
+    .map((f) => f.replace(/\.js$/, ''));
+  for (const id of providerFiles) {
+    const code = read(`background/providers/${id}.js`);
+    code.includes(`P.register('${id}'`)
+      ? good(`provider "${id}" registers itself`)
+      : bad(`provider file ${id}.js does not call P.register('${id}')`);
+  }
+
+  // The side panel needs the modules it references at runtime.
+  const html = read('sidepanel.html');
+  for (const needed of ['shared/errors.js', 'shared/act.js']) {
+    html.includes(`src="${needed}"`) ? good(`sidepanel.html loads ${needed}`) : bad(`sidepanel.html is missing <script src="${needed}">`);
   }
 }
 

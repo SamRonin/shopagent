@@ -47,7 +47,19 @@
         "https://basalam.com/*",
         "https://www.basalam.com/*"
       ],
-      "js": ["shared/utils.js", "shared/sites.js", "content/content.js"],
+      "js": [
+        "shared/utils.js",
+        "shared/act.js",
+        "shared/sites.js",
+        "content/adapters/digikala.js",
+        "content/adapters/basalam.js",
+        "content/adapters/index.js",
+        "content/actions/dom.js",
+        "content/actions/interact.js",
+        "content/actions/extract.js",
+        "content/actions/hud.js",
+        "content/content.js"
+      ],
       "css": ["content/content.css"],
       "run_at": "document_idle",
       "all_frames": false
